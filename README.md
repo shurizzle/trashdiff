@@ -5,12 +5,13 @@ you can put each waste type out.
 
 ## Concept
 
-Each weekday has a pickup type and a global pickup time. The window for the
-type collected on day D opens at the pickup time on D-1 and closes at the
-pickup time on D.
+Each schedule entry ties a waste type to a weekday and a set of weeks of the
+month (1st..5th). The window for the type collected on day D opens at the
+pickup time on D-1 and closes at the pickup time on D.
 
-Example: `monday = "Carta"`, `pickup_time = "17:00"` → paper can be put out
-from Sunday 17:00 to Monday 17:00.
+Example: `entry day = monday, weeks = [1, 3], type = "Carta"`, `pickup_time =
+"17:00"` → paper is collected on the 1st and 3rd Monday of the month, and can
+be put out from the preceding Sunday 17:00 to Monday 17:00.
 
 ## Build
 
@@ -91,29 +92,39 @@ trashdiff cli
 
 ## Web interface
 
-- `/` — what to throw now, today's pickup, weekly table
-- `/admin` — backoffice: per-day waste types (free text, empty = no pickup),
-  global pickup time, timezone
+- `/` — what to throw now, today's pickup, weekly table (current week)
+- `/admin` — backoffice: one row per pickup under each weekday (weekdays are
+  fixed and always shown). Tick weeks 1-5 and type the waste type; `+`
+  duplicates that weekday, `-` removes the row, no JS needed. Plus global
+  pickup time and timezone
 - `EN`/`IT` toggle — language switch, persisted in a cookie
 - Dark mode — follows the OS theme (`prefers-color-scheme`)
 
 ## Database file
 
-TOML, created with defaults on first run. Edited from the backoffice.
+TOML, created with defaults on first run. Edited from the backoffice. The
+file is locked (shared on read, exclusive on write) and re-read on every
+request, so multiple instances can run against the same database
+concurrently.
 
 ```toml
 timezone    = "Europe/Rome"
 pickup_time = "17:00"
 
-[schedule]
-monday    = "Carta"
-tuesday   = "Umido"
+[[schedule]]
+day = "monday"
+weeks = [1, 3]
+type = "Carta"
 ```
 
 - `timezone`: IANA name (required — servers usually run UTC, the schedule is
   wall-clock local time)
-- `schedule`: weekday (`monday`..`sunday`) → waste type; missing/empty = no
-  pickup that day
+- `schedule`: list of entries; each entry has a weekday (`monday`..`sunday`),
+  the weeks of the month (1-5) it applies to, and the waste type. Entries
+  must not overlap on the same `(day, week)` pair — the backoffice rejects
+  duplicates.
+- Old single-key format (`monday = "Carta"`) is auto-detected and migrated to
+  one entry covering all 5 weeks on load.
 
 ## Test
 

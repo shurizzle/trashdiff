@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 use actix_web::http::header::{COOKIE, LOCATION};
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, web};
@@ -31,6 +32,14 @@ fn day_index(wd: Weekday) -> usize {
     wd.num_days_from_monday() as usize
 }
 
+fn day_index_of(day: &str) -> usize {
+    DAY_KEYS.iter().position(|d| *d == day).unwrap_or(DAY_KEYS.len())
+}
+
+fn sort_key(e: &Entry) -> (bool, u32) {
+    (e.weeks.is_empty(), e.weeks.iter().min().copied().unwrap_or(0))
+}
+
 fn lang_of(req: &HttpRequest) -> Lang {
     let cookie = req
         .headers()
@@ -50,32 +59,82 @@ struct Db {
     timezone: String,
     pickup_time: String,
     #[serde(default)]
+    schedule: Vec<Entry>,
+}
+
+#[derive(Deserialize)]
+struct DbOld {
+    timezone: String,
+    pickup_time: String,
+    #[serde(default)]
     schedule: HashMap<String, String>,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+struct Entry {
+    day: String,
+    weeks: Vec<u32>,
+    #[serde(rename = "type")]
+    kind: String,
+}
+
 fn default_db() -> Db {
-    let schedule = HashMap::new();
     Db {
         timezone: "Europe/Rome".to_string(),
         pickup_time: "05:00".to_string(),
+        schedule: Vec::new(),
+    }
+}
+
+fn migrate_old(old: DbOld) -> Db {
+    let schedule = old
+        .schedule
+        .into_iter()
+        .map(|(day, kind)| Entry {
+            day,
+            weeks: vec![1, 2, 3, 4, 5],
+            kind,
+        })
+        .collect();
+    Db {
+        timezone: old.timezone,
+        pickup_time: old.pickup_time,
         schedule,
     }
+}
+
+fn week_of_month(date: chrono::NaiveDate) -> u32 {
+    (date.day() - 1) / 7 + 1
 }
 
 struct State {
     db_path: PathBuf,
     timezone: Tz,
     pickup_time: NaiveTime,
-    schedule: HashMap<String, String>,
+    schedule: Vec<Entry>,
 }
 
 impl State {
     fn load(db_path: PathBuf) -> Result<State, String> {
         let db = if db_path.exists() {
-            let raw = std::fs::read_to_string(&db_path)
+            let mut f = File::open(&db_path)
+                .map_err(|e| format!("impossibile aprire {:?}: {e}", db_path))?;
+            f.lock_shared()
+                .map_err(|e| format!("lock {:?}: {e}", db_path))?;
+            let mut raw = String::new();
+            f.read_to_string(&mut raw)
                 .map_err(|e| format!("impossibile leggere {:?}: {e}", db_path))?;
-            toml::from_str::<Db>(&raw)
-                .map_err(|e| format!("database {:?} non valido: {e}", db_path))?
+            drop(f);
+            match toml::from_str::<Db>(&raw) {
+                Ok(db) => db,
+                Err(_) => {
+                    let old: DbOld = toml::from_str(&raw)
+                        .map_err(|e| format!("database {:?} non valido: {e}", db_path))?;
+                    let db = migrate_old(old);
+                    Self::save_file(&db_path, &db)?;
+                    db
+                }
+            }
         } else {
             let db = default_db();
             Self::save_file(&db_path, &db)?;
@@ -101,13 +160,30 @@ impl State {
 
     fn save_file(db_path: &PathBuf, db: &Db) -> Result<(), String> {
         let raw = toml::to_string_pretty(db).map_err(|e| format!("serializzazione: {e}"))?;
-        std::fs::write(db_path, raw).map_err(|e| format!("scrittura {:?}: {e}", db_path))
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(db_path)
+            .map_err(|e| format!("apertura {:?}: {e}", db_path))?;
+        f.lock()
+            .map_err(|e| format!("lock {:?}: {e}", db_path))?;
+        f.set_len(0)
+            .map_err(|e| format!("scrittura {:?}: {e}", db_path))?;
+        f.write_all(raw.as_bytes())
+            .map_err(|e| format!("scrittura {:?}: {e}", db_path))?;
+        f.sync_all()
+            .map_err(|e| format!("sync {:?}: {e}", db_path))?;
+        Ok(())
     }
 
-    fn type_for(&self, wd: Weekday) -> String {
+    fn type_for(&self, date: chrono::NaiveDate) -> String {
+        let day = DAY_KEYS[day_index(date.weekday())];
+        let week = week_of_month(date);
         self.schedule
-            .get(DAY_KEYS[day_index(wd)])
-            .cloned()
+            .iter()
+            .find(|e| e.day == day && e.weeks.contains(&week))
+            .map(|e| e.kind.clone())
             .unwrap_or_default()
     }
 
@@ -123,15 +199,23 @@ impl State {
             let date = now.date_naive() + Duration::days(i);
             let b = self.boundary(date);
             if b > now {
-                return (date, date.weekday(), self.type_for(date.weekday()));
+                return (date, date.weekday(), self.type_for(date));
             }
         }
         unreachable!()
     }
 }
 
-#[derive(Clone)]
-struct AppState(Arc<Mutex<State>>);
+struct AppState(PathBuf);
+
+#[allow(clippy::result_large_err)]
+fn load_or_500(data: &AppState) -> Result<State, HttpResponse> {
+    State::load(data.0.clone()).map_err(|e| {
+        HttpResponse::InternalServerError()
+            .content_type("text/plain; charset=utf-8")
+            .body(e)
+    })
+}
 
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -161,6 +245,14 @@ th{{background:#f2f2f2}}
 nav a{{margin-right:1rem}}
 .err{{background:#fdecea;color:#b00020;padding:.6rem;border-radius:.5rem}}
 input[type=text]{{width:100%;box-sizing:border-box;padding:.4rem}}
+.field{{display:flex}}
+.field input[type=text]{{flex:1;width:auto;border-right:none;border-radius:.3rem 0 0 .3rem}}
+.field button{{border-radius:0 .3rem .3rem 0}}
+.add-btn{{padding:.05rem .5rem;font-size:.75rem;vertical-align:middle}}
+.weeks input[type=checkbox]{{position:absolute;opacity:0;pointer-events:none}}
+.weeks label{{display:inline-block;padding:.15rem .55rem;margin:0 .2rem .2rem 0;border-radius:.3rem;cursor:pointer;background:#888;color:#fff;font-size:.9rem}}
+.weeks input:checked + label{{background:#2e7d32}}
+.weeks input:checked + label.bad{{background:#c62828}}
 form p{{margin:.6rem 0}}
 button{{padding:.5rem 1.2rem;cursor:pointer}}
 @media (prefers-color-scheme:dark) {{
@@ -204,7 +296,7 @@ fn home_html(st: &State, lng: Lang) -> String {
     let now = Utc::now().with_timezone(&st.timezone);
     let pickup = st.pickup_time;
     let (open_date, _owd, open_type) = st.next_boundary(now);
-    let today_type = st.type_for(now.date_naive().weekday());
+    let today_type = st.type_for(now.date_naive());
 
     let open_dt = open_date
         .and_time(pickup)
@@ -239,24 +331,24 @@ fn home_html(st: &State, lng: Lang) -> String {
         )
     };
 
-    let base = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-    let types = (0..7)
-        .map(|i| st.type_for((base + Duration::days(i as i64)).weekday()))
-        .collect::<Vec<_>>();
     let dnames = days(lng);
+    let monday = now.date_naive() - Duration::days(day_index(now.weekday()) as i64);
     let rows = (0..7)
         .map(|i| {
+            let d = monday + Duration::days(i);
+            let ty = st.type_for(d);
+            let wi = day_index(d.weekday());
             format!(
                 "<tr><td>{}</td><td>{}</td><td>{} {} → {} {}</td></tr>",
-                dnames[i],
-                if types[i].is_empty() {
+                dnames[wi],
+                if ty.is_empty() {
                     "—".to_string()
                 } else {
-                    esc(&types[i])
+                    esc(&ty)
                 },
-                dnames[(i + 6) % 7],
+                dnames[(wi + 6) % 7],
                 pickup.format("%H:%M"),
-                dnames[i],
+                dnames[wi],
                 pickup.format("%H:%M")
             )
         })
@@ -269,7 +361,10 @@ fn home_html(st: &State, lng: Lang) -> String {
 <h2>{week}</h2>
 <table><tr><th>{col_day}</th><th>{col_type}</th><th>{col_window}</th></tr>{rows}</table>"#,
         title_home = esc(t(lng, "title_home")),
-        week = esc(t(lng, "week")),
+        week = esc(&fill(
+            t(lng, "week"),
+            &[&week_of_month(now.date_naive()).to_string()],
+        )),
         col_day = esc(t(lng, "col_day")),
         col_type = esc(t(lng, "col_type")),
         col_window = esc(t(lng, "col_window")),
@@ -281,81 +376,97 @@ fn home_html(st: &State, lng: Lang) -> String {
 
 async fn home(req: HttpRequest, data: web::Data<AppState>) -> HttpResponse {
     let lng = lang_of(&req);
-    let body = {
-        let st = data.0.lock().unwrap();
-        home_html(&st, lng)
+    let st = match load_or_500(&data) {
+        Ok(st) => st,
+        Err(resp) => return resp,
     };
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
-        .body(page(lng, t(lng, "title_home"), body))
+        .body(page(lng, t(lng, "title_home"), home_html(&st, lng)))
 }
 
 fn admin_form_from_state(st: &State) -> AdminForm {
-    let sched = &st.schedule;
     AdminForm {
         timezone: st.timezone.to_string(),
         pickup_time: st.pickup_time.format("%H:%M").to_string(),
-        day_monday: sched.get("monday").cloned().unwrap_or_default(),
-        day_tuesday: sched.get("tuesday").cloned().unwrap_or_default(),
-        day_wednesday: sched.get("wednesday").cloned().unwrap_or_default(),
-        day_thursday: sched.get("thursday").cloned().unwrap_or_default(),
-        day_friday: sched.get("friday").cloned().unwrap_or_default(),
-        day_saturday: sched.get("saturday").cloned().unwrap_or_default(),
-        day_sunday: sched.get("sunday").cloned().unwrap_or_default(),
+        entries: st.schedule.clone(),
+        action: String::new(),
     }
 }
 
 async fn admin_get(req: HttpRequest, data: web::Data<AppState>) -> HttpResponse {
     let lng = lang_of(&req);
-    let form = {
-        let st = data.0.lock().unwrap();
-        admin_form_from_state(&st)
+    let st = match load_or_500(&data) {
+        Ok(st) => st,
+        Err(resp) => return resp,
     };
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
         .body(page(
             lng,
             t(lng, "title_admin"),
-            admin_form_html(lng, form, None),
+            admin_form_html(lng, admin_form_from_state(&st), FormErrors::default()),
         ))
 }
 
-#[derive(Deserialize)]
 struct AdminForm {
     timezone: String,
     pickup_time: String,
-    day_monday: String,
-    day_tuesday: String,
-    day_wednesday: String,
-    day_thursday: String,
-    day_friday: String,
-    day_saturday: String,
-    day_sunday: String,
+    entries: Vec<Entry>,
+    action: String,
 }
 
-fn admin_form_html(lng: Lang, f: AdminForm, err: Option<String>) -> String {
-    let err_html = err
-        .map(|e| format!("<p class=\"err\">{}</p>", esc(&e)))
-        .unwrap_or_default();
-    let full = days_full(lng);
-    let days = [
-        ("day_monday", full[0], f.day_monday),
-        ("day_tuesday", full[1], f.day_tuesday),
-        ("day_wednesday", full[2], f.day_wednesday),
-        ("day_thursday", full[3], f.day_thursday),
-        ("day_friday", full[4], f.day_friday),
-        ("day_saturday", full[5], f.day_saturday),
-        ("day_sunday", full[6], f.day_sunday),
-    ];
-    let fields = days
-        .into_iter()
-        .map(|(name, label, val)| {
+#[derive(Default)]
+struct FormErrors {
+    fields: HashMap<String, String>,
+    bad_weeks: HashMap<String, Vec<u32>>,
+}
+
+fn row_html(day: &str, idx: usize, e: &Entry, errs: &FormErrors) -> String {
+    let row_key = format!("{day}:{idx}");
+    let bad = errs.bad_weeks.get(&row_key).map(Vec::as_slice).unwrap_or(&[]);
+    let week_checks = (1..=5)
+        .map(|w| {
+            let ck = if e.weeks.contains(&w) { " checked" } else { "" };
+            let cls = if bad.contains(&w) { " class=\"bad\"" } else { "" };
             format!(
-                "<p><label>{label}<br><input type=\"text\" name=\"{name}\" value=\"{}\"></label></p>",
-                esc(&val)
+                "<input type=\"checkbox\" id=\"{day}_w{idx}_{w}\" name=\"{day}_weeks_{idx}\" value=\"{w}\"{ck}>\
+                 <label for=\"{day}_w{idx}_{w}\"{cls}>{w}</label>"
             )
         })
         .collect::<String>();
+    format!(
+        "<p><span class=\"weeks\">{week_checks}</span> <span class=\"field\">\
+         <input type=\"text\" name=\"{day}_type_{idx}\" value=\"{}\">\
+         <button type=\"submit\" name=\"del\" value=\"{day}:{idx}\">-</button></span></p>{}",
+        esc(&e.kind),
+        errs.fields
+            .get(&row_key)
+            .map(|e| format!("<span class=\"err\">{}</span>", esc(e)))
+            .unwrap_or_default(),
+    )
+}
+
+fn admin_form_html(lng: Lang, f: AdminForm, errs: FormErrors) -> String {
+    let err_html = errs
+        .fields
+        .get("form")
+        .map(|e| format!("<p class=\"err\">{}</p>", esc(e)))
+        .unwrap_or_default();
+    let full = days_full(lng);
+    let mut days_html = String::new();
+    for (di, day) in DAY_KEYS.iter().enumerate() {
+        let mut rows = String::new();
+        let mut day_entries: Vec<&Entry> = f.entries.iter().filter(|e| e.day == *day).collect();
+        day_entries.sort_by_key(|e| sort_key(e));
+        for (idx, e) in day_entries.iter().enumerate() {
+            rows += &row_html(day, idx, e, &errs);
+        }
+        days_html += &format!(
+            "<h3>{} <button type=\"submit\" class=\"add-btn\" name=\"add\" value=\"{day}\">+</button></h3>{rows}",
+            full[di]
+        );
+    }
     let tz_options = TZ_VARIANTS
         .iter()
         .map(|tz| {
@@ -373,11 +484,11 @@ fn admin_form_html(lng: Lang, f: AdminForm, err: Option<String>) -> String {
         r#"<h1>{title}</h1>
 {err_html}
 <form method="post" action="/admin">
-<p><label>{plabel}<br><input type="text" name="pickup_time" value="{pt}"></label></p>
-<p><label>{tzlabel}<br><select name="timezone">{tzopts}</select></label></p>
-{fields}
+<p><label>{plabel}<br><input type="text" name="pickup_time" value="{pt}"></label>{pt_err}</p>
+<p><label>{tzlabel}<br><select name="timezone">{tzopts}</select></label>{tz_err}</p>
+{days_html}
 <p><em>{hint}</em></p>
-<p><button type="submit">{save}</button></p>
+<p><button type="submit" name="save">{save}</button></p>
 </form>"#,
         title = esc(t(lng, "title_admin")),
         plabel = esc(t(lng, "pickup_time_label")),
@@ -385,64 +496,133 @@ fn admin_form_html(lng: Lang, f: AdminForm, err: Option<String>) -> String {
         hint = esc(t(lng, "empty_hint")),
         save = esc(t(lng, "save")),
         pt = esc(&f.pickup_time),
+        pt_err = errs.fields.get("pickup_time").map(|e| format!("<span class=\"err\">{}</span>", esc(e))).unwrap_or_default(),
+        tz_err = errs.fields.get("timezone").map(|e| format!("<span class=\"err\">{}</span>", esc(e))).unwrap_or_default(),
         tzopts = tz_options,
-        fields = fields,
+        days_html = days_html,
     )
 }
 
-fn validate_and_save(st: &mut State, f: &AdminForm, lng: Lang) -> Result<(), String> {
-    let timezone: Tz = f
-        .timezone
-        .parse()
-        .map_err(|e| format!("{}: {e}", t(lng, "err_tz")))?;
-    let pickup_time = NaiveTime::parse_from_str(&f.pickup_time, "%H:%M")
-        .map_err(|e| format!("{}: {e}", t(lng, "err_time")))?;
-    let mut schedule = HashMap::new();
-    for (name, val) in [
-        ("monday", &f.day_monday),
-        ("tuesday", &f.day_tuesday),
-        ("wednesday", &f.day_wednesday),
-        ("thursday", &f.day_thursday),
-        ("friday", &f.day_friday),
-        ("saturday", &f.day_saturday),
-        ("sunday", &f.day_sunday),
-    ] {
-        if !val.trim().is_empty() {
-            schedule.insert(name.to_string(), val.trim().to_string());
+fn validate_and_save(
+    db_path: &PathBuf,
+    f: &AdminForm,
+    lng: Lang,
+) -> Result<(), FormErrors> {
+    let mut errs = FormErrors::default();
+    if let Err(e) = f.timezone.parse::<Tz>() {
+        errs.fields
+            .insert("timezone".to_string(), format!("{}: {e}", t(lng, "err_tz")));
+    }
+    if let Err(e) = NaiveTime::parse_from_str(&f.pickup_time, "%H:%M") {
+        errs.fields.insert(
+            "pickup_time".to_string(),
+            format!("{}: {e}", t(lng, "err_time")),
+        );
+    }
+    let mut schedule: Vec<Entry> = Vec::new();
+    let mut seen: HashSet<(String, u32)> = HashSet::new();
+    for day in DAY_KEYS {
+        let mut day_entries: Vec<&Entry> = f.entries.iter().filter(|e| e.day == *day).collect();
+        day_entries.sort_by_key(|e| sort_key(e));
+        for (idx, e) in day_entries.iter().enumerate() {
+            if !e.kind.trim().is_empty() {
+                let di = day_index_of(day);
+                let mut weeks: Vec<u32> =
+                    e.weeks.iter().copied().filter(|w| (1..=5).contains(w)).collect();
+                weeks.sort_unstable();
+                weeks.dedup();
+                if !weeks.is_empty() {
+                    for w in &weeks {
+                        if !seen.insert((e.day.clone(), *w)) {
+                            let key = format!("{day}:{idx}");
+                            errs.fields.entry(key.clone()).or_insert_with(|| {
+                                fill(t(lng, "err_overlap"), &[days_full(lng)[di], &w.to_string()])
+                            });
+                            errs.bad_weeks.entry(key).or_default().push(*w);
+                        }
+                    }
+                    schedule.push(Entry {
+                        day: e.day.clone(),
+                        weeks,
+                        kind: e.kind.trim().to_string(),
+                    });
+                }
+            }
         }
+    }
+    if !errs.fields.is_empty() || !errs.bad_weeks.is_empty() {
+        return Err(errs);
     }
     let db = Db {
         timezone: f.timezone.clone(),
         pickup_time: f.pickup_time.clone(),
         schedule,
     };
-    State::save_file(&st.db_path, &db).map_err(|e| format!("{}: {e}", t(lng, "err_io")))?;
-    st.timezone = timezone;
-    st.pickup_time = pickup_time;
-    st.schedule = db.schedule;
+    if let Err(e) = State::save_file(db_path, &db) {
+        let mut errs = FormErrors::default();
+        errs.fields.insert("form".to_string(), format!("{}: {e}", t(lng, "err_io")));
+        return Err(errs);
+    }
     Ok(())
 }
 
-async fn admin_post(
-    req: HttpRequest,
-    data: web::Data<AppState>,
-    form: web::Form<AdminForm>,
-) -> HttpResponse {
-    let lng = lang_of(&req);
-    let f = form.into_inner();
-    let result = {
-        let mut st = data.0.lock().unwrap();
-        validate_and_save(&mut st, &f, lng)
-    };
-    if let Err(e) = result {
-        let body = admin_form_html(lng, f, Some(e));
-        return HttpResponse::BadRequest()
-            .content_type("text/html; charset=utf-8")
-            .body(page(lng, t(lng, "title_admin"), body));
+#[allow(clippy::result_large_err)]
+fn process_admin(
+    mut f: AdminForm,
+    db_path: &PathBuf,
+    lng: Lang,
+) -> Result<Option<AdminForm>, (AdminForm, FormErrors)> {
+    if let Some(day) = f.action.strip_prefix("add:") {
+        let mut covered: HashSet<u32> = HashSet::new();
+        for e in f.entries.iter().filter(|e| e.day == day) {
+            covered.extend(e.weeks.iter().copied());
+        }
+        let weeks: Vec<u32> = (1..=5).filter(|w| !covered.contains(w)).collect();
+        f.entries.push(Entry {
+            day: day.to_string(),
+            weeks,
+            kind: String::new(),
+        });
+        return Ok(Some(f));
     }
-    HttpResponse::SeeOther()
-        .insert_header((LOCATION, "/"))
-        .finish()
+    if let Some(spec) = f.action.strip_prefix("del:") {
+        let (day, idx) = spec.split_once(':').unwrap_or(("", "0"));
+        let idx = idx.parse::<usize>().unwrap_or(usize::MAX);
+        let mut i = 0;
+        f.entries.retain(|e| {
+            if e.day != day {
+                return true;
+            }
+            let keep = i != idx;
+            i += 1;
+            keep
+        });
+        return Ok(Some(f));
+    }
+    match validate_and_save(db_path, &f, lng) {
+        Ok(()) => Ok(None),
+        Err(errs) => Err((f, errs)),
+    }
+}
+
+async fn admin_post(req: HttpRequest, data: web::Data<AppState>, body: web::Bytes) -> HttpResponse {
+    let lng = lang_of(&req);
+    let f = form_from_body(&body);
+    match process_admin(f, &data.0, lng) {
+        Ok(Some(form)) => HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8")
+            .body(page(
+                lng,
+                t(lng, "title_admin"),
+                admin_form_html(lng, form, FormErrors::default()),
+            )),
+        Ok(None) => HttpResponse::SeeOther()
+            .insert_header((LOCATION, "/"))
+            .finish(),
+        Err((form, errs)) => HttpResponse::BadRequest()
+            .content_type("text/html; charset=utf-8")
+            .body(page(lng, t(lng, "title_admin"), admin_form_html(lng, form, errs))),
+    }
 }
 
 async fn switch_lang(req: HttpRequest, path: web::Path<String>) -> HttpResponse {
@@ -585,14 +765,7 @@ fn cli_cmd(db_path: PathBuf) -> Result<(), String> {
 }
 
 async fn serve(bind: String, db_path: PathBuf) -> std::io::Result<()> {
-    let state = match State::load(db_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    };
-    let data = web::Data::new(AppState(Arc::new(Mutex::new(state))));
+    let data = web::Data::new(AppState(db_path));
     println!("trashdiff listening on http://{bind}");
     HttpServer::new(move || {
         App::new()
@@ -616,17 +789,48 @@ fn lang_from_headers(h: &http::HeaderMap) -> Lang {
 }
 
 fn form_from_body(body: &[u8]) -> AdminForm {
-    let pairs: HashMap<String, String> = form_urlencoded::parse(body).into_owned().collect();
+    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+    for (k, v) in form_urlencoded::parse(body) {
+        groups.entry(k.into_owned()).or_default().push(v.into_owned());
+    }
+    let get = |key: &str| {
+        groups
+            .get(key)
+            .and_then(|v| v.first())
+            .cloned()
+            .unwrap_or_default()
+    };
+    let mut entries = Vec::new();
+    for day in DAY_KEYS {
+        for i in 0.. {
+            if !groups.contains_key(&format!("{day}_type_{i}")) {
+                break;
+            }
+            let weeks = groups
+                .get(&format!("{day}_weeks_{i}"))
+                .map(|vs| vs.iter().filter_map(|w| w.parse::<u32>().ok()).collect())
+                .unwrap_or_default();
+            entries.push(Entry {
+                day: day.to_string(),
+                weeks,
+                kind: get(&format!("{day}_type_{i}")),
+            });
+        }
+    }
+    let action = if groups.contains_key("save") {
+        "save".to_string()
+    } else if let Some(v) = groups.get("add") {
+        format!("add:{}", v[0])
+    } else if let Some(v) = groups.get("del") {
+        format!("del:{}", v[0])
+    } else {
+        String::new()
+    };
     AdminForm {
-        timezone: pairs.get("timezone").cloned().unwrap_or_default(),
-        pickup_time: pairs.get("pickup_time").cloned().unwrap_or_default(),
-        day_monday: pairs.get("day_monday").cloned().unwrap_or_default(),
-        day_tuesday: pairs.get("day_tuesday").cloned().unwrap_or_default(),
-        day_wednesday: pairs.get("day_wednesday").cloned().unwrap_or_default(),
-        day_thursday: pairs.get("day_thursday").cloned().unwrap_or_default(),
-        day_friday: pairs.get("day_friday").cloned().unwrap_or_default(),
-        day_saturday: pairs.get("day_saturday").cloned().unwrap_or_default(),
-        day_sunday: pairs.get("day_sunday").cloned().unwrap_or_default(),
+        timezone: get("timezone"),
+        pickup_time: get("pickup_time"),
+        entries,
+        action,
     }
 }
 
@@ -658,7 +862,7 @@ fn redirect(
 }
 
 fn route_cgi(
-    st: &mut State,
+    st: &State,
     lng: Lang,
     method: &Method,
     path: &str,
@@ -686,10 +890,15 @@ fn route_cgi(
     if path == "/admin" || path.ends_with("/admin") {
         if *method == Method::POST {
             let f = form_from_body(&body);
-            return match validate_and_save(st, &f, lng) {
-                Ok(()) => redirect("/", None),
-                Err(e) => {
-                    let html = page(lng, t(lng, "title_admin"), admin_form_html(lng, f, Some(e)));
+            return match process_admin(f, &st.db_path, lng) {
+                Ok(Some(form)) => {
+                    let html =
+                        page(lng, t(lng, "title_admin"), admin_form_html(lng, form, FormErrors::default()));
+                    respond(StatusCode::OK, html)
+                }
+                Ok(None) => redirect("/", None),
+                Err((form, errs)) => {
+                    let html = page(lng, t(lng, "title_admin"), admin_form_html(lng, form, errs));
                     respond(StatusCode::BAD_REQUEST, html)
                 }
             };
@@ -697,7 +906,7 @@ fn route_cgi(
         let html = page(
             lng,
             t(lng, "title_admin"),
-            admin_form_html(lng, admin_form_from_state(st), None),
+            admin_form_html(lng, admin_form_from_state(st), FormErrors::default()),
         );
         return respond(StatusCode::OK, html);
     }
@@ -738,10 +947,9 @@ async fn cgi_run(db: PathBuf) -> std::io::Result<()> {
                 .await
                 .map_err(std::io::Error::other)?
                 .to_bytes();
-            let mut st = st;
             let lng = lang_from_headers(&headers);
             let resp: Result<http::Response<BoxBody<Bytes, std::io::Error>>, std::io::Error> =
-                Ok(route_cgi(&mut st, lng, &method, &path, &headers, body));
+                Ok(route_cgi(&st, lng, &method, &path, &headers, body));
             resp
         },
     )
@@ -785,19 +993,17 @@ where
 }
 
 async fn fcgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
-    let state = State::load(db).map_err(std::io::Error::other)?;
-    let state = Arc::new(Mutex::new(state));
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     println!("trashdiff fcgi listening on {bind}");
     loop {
         let (stream, _) = listener.accept().await?;
-        let state = Arc::clone(&state);
+        let db = db.clone();
         tokio::spawn(async move {
             let _ = cegla_fcgi::server::server_handle_fcgi(
                 stream,
                 TokioRt,
                 move |request, _stderr| {
-                    let state = Arc::clone(&state);
+                    let db = db.clone();
                     async move {
                         let method = request.method().clone();
                         let path = request.uri().path().to_string();
@@ -809,10 +1015,9 @@ async fn fcgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
                             .unwrap_or(0);
                         let body = read_body_capped(request.into_body(), content_length).await?;
                         let lng = lang_from_headers(&headers);
-                        let resp: Result<http::Response<BoxBody<Bytes, std::io::Error>>, std::io::Error> = {
-                            let mut st = state.lock().unwrap();
-                            Ok(route_cgi(&mut st, lng, &method, &path, &headers, body))
-                        };
+                        let st = State::load(db).map_err(std::io::Error::other)?;
+                        let resp: Result<http::Response<BoxBody<Bytes, std::io::Error>>, std::io::Error> =
+                            Ok(route_cgi(&st, lng, &method, &path, &headers, body));
                         resp
                     }
                 },
@@ -823,18 +1028,16 @@ async fn fcgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
 }
 
 async fn scgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
-    let state = State::load(db).map_err(std::io::Error::other)?;
-    let state = Arc::new(Mutex::new(state));
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     println!("trashdiff scgi listening on {bind}");
     loop {
         let (stream, _) = listener.accept().await?;
-        let state = Arc::clone(&state);
+        let db = db.clone();
         tokio::spawn(async move {
             let _ = cegla_scgi::server::server_handle_scgi(
                 stream,
                 move |request| {
-                    let state = Arc::clone(&state);
+                    let db = db.clone();
                     async move {
                         let method = request.method().clone();
                         let path = request.uri().path().to_string();
@@ -846,10 +1049,9 @@ async fn scgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
                             .unwrap_or(0);
                         let body = read_body_capped(request.into_body(), content_length).await?;
                         let lng = lang_from_headers(&headers);
-                        let resp: Result<http::Response<BoxBody<Bytes, std::io::Error>>, std::io::Error> = {
-                            let mut st = state.lock().unwrap();
-                            Ok(route_cgi(&mut st, lng, &method, &path, &headers, body))
-                        };
+                        let st = State::load(db).map_err(std::io::Error::other)?;
+                        let resp: Result<http::Response<BoxBody<Bytes, std::io::Error>>, std::io::Error> =
+                            Ok(route_cgi(&st, lng, &method, &path, &headers, body));
                         resp
                     }
                 },
@@ -862,11 +1064,21 @@ async fn scgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn state() -> State {
-        let mut schedule = HashMap::new();
-        schedule.insert("monday".to_string(), "Carta".to_string());
-        schedule.insert("tuesday".to_string(), "Umido".to_string());
+        let schedule = vec![
+            Entry {
+                day: "monday".to_string(),
+                weeks: vec![1],
+                kind: "Carta".to_string(),
+            },
+            Entry {
+                day: "tuesday".to_string(),
+                weeks: vec![1],
+                kind: "Umido".to_string(),
+            },
+        ];
         State {
             db_path: PathBuf::from("/nonexistent"),
             timezone: "Europe/Rome".parse().unwrap(),
@@ -922,6 +1134,67 @@ mod tests {
         assert_eq!(t, "");
     }
 
+    #[test]
+    fn week2_only_skips_week1() {
+        let mut st = state();
+        st.schedule = vec![Entry {
+            day: "monday".to_string(),
+            weeks: vec![2],
+            kind: "Carta".to_string(),
+        }];
+        // 2024-01-01 is Monday of week 1: not collected -> pause
+        let (d, _wd, t) = st.next_boundary(at("2024-01-01", "10:00", &st));
+        assert_eq!(d, chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+        assert_eq!(t, "");
+        // 2024-01-08 is Monday of week 2: collected
+        let (d, _wd, t) = st.next_boundary(at("2024-01-08", "10:00", &st));
+        assert_eq!(d, chrono::NaiveDate::from_ymd_opt(2024, 1, 8).unwrap());
+        assert_eq!(t, "Carta");
+    }
+
+    #[test]
+    fn overlap_rejected() {
+        let f = AdminForm {
+            timezone: "Europe/Rome".to_string(),
+            pickup_time: "17:00".to_string(),
+            entries: vec![
+                Entry {
+                    day: "monday".to_string(),
+                    weeks: vec![1, 2],
+                    kind: "Carta".to_string(),
+                },
+                Entry {
+                    day: "monday".to_string(),
+                    weeks: vec![2, 3],
+                    kind: "Plastica".to_string(),
+                },
+            ],
+            action: "save".to_string(),
+        };
+        let errs = validate_and_save(&PathBuf::from("/nonexistent"), &f, Lang::It).unwrap_err();
+        assert!(errs.fields.contains_key("monday:1"));
+        assert_eq!(errs.bad_weeks.get("monday:1").unwrap(), &[2]);
+    }
+
+    #[test]
+    fn load_migrates_old_format() {
+        let path = std::env::temp_dir().join(format!("trashdiff_migrate_{}", std::process::id()));
+        std::fs::write(
+            &path,
+            "timezone = \"Europe/Rome\"\npickup_time = \"17:00\"\n\n[schedule]\nmonday = \"Carta\"\ntuesday = \"Umido\"\n",
+        )
+        .unwrap();
+        let st = State::load(path.clone()).unwrap();
+        assert_eq!(st.schedule.len(), 2);
+        for e in &st.schedule {
+            assert_eq!(e.weeks, vec![1, 2, 3, 4, 5]);
+        }
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("[[schedule]]"));
+        assert!(raw.contains("monday"));
+        std::fs::remove_file(&path).ok();
+    }
+
     use cegla_fcgi::protocol::{
         codec::{Decoder, Encoder},
         constants::{RecordType, Role},
@@ -934,13 +1207,13 @@ mod tests {
     #[tokio::test]
     async fn fcgi_roundtrip_serves_home() {
         let (client_io, server_io) = tokio::io::duplex(1024);
-        let state = Arc::new(Mutex::new(state()));
+        let st = Arc::new(state());
         let handle = tokio::spawn(async move {
             cegla_fcgi::server::server_handle_fcgi(
                 server_io,
                 TokioRt,
                 move |request, _stderr| {
-                    let state = Arc::clone(&state);
+                    let st = Arc::clone(&st);
                     async move {
                         let method = request.method().clone();
                         let path = request.uri().path().to_string();
@@ -952,10 +1225,8 @@ mod tests {
                             .unwrap_or(0);
                         let body = read_body_capped(request.into_body(), content_length).await?;
                         let lng = lang_from_headers(&headers);
-                        let resp: Result<http::Response<BoxBody<Bytes, std::io::Error>>, std::io::Error> = {
-                            let mut st = state.lock().unwrap();
-                            Ok(route_cgi(&mut st, lng, &method, &path, &headers, body))
-                        };
+                        let resp: Result<http::Response<BoxBody<Bytes, std::io::Error>>, std::io::Error> =
+                            Ok(route_cgi(&st, lng, &method, &path, &headers, body));
                         resp
                     }
                 },
@@ -1019,13 +1290,13 @@ mod tests {
     #[tokio::test]
     async fn fcgi_roundtrip_post_admin_validation() {
         let (client_io, server_io) = tokio::io::duplex(1024);
-        let state = Arc::new(Mutex::new(state()));
+        let st = Arc::new(state());
         let handle = tokio::spawn(async move {
             cegla_fcgi::server::server_handle_fcgi(
                 server_io,
                 TokioRt,
                 move |request, _stderr| {
-                    let state = Arc::clone(&state);
+                    let st = Arc::clone(&st);
                     async move {
                         let method = request.method().clone();
                         let path = request.uri().path().to_string();
@@ -1037,10 +1308,8 @@ mod tests {
                             .unwrap_or(0);
                         let body = read_body_capped(request.into_body(), content_length).await?;
                         let lng = lang_from_headers(&headers);
-                        let resp: Result<http::Response<BoxBody<Bytes, std::io::Error>>, std::io::Error> = {
-                            let mut st = state.lock().unwrap();
-                            Ok(route_cgi(&mut st, lng, &method, &path, &headers, body))
-                        };
+                        let resp: Result<http::Response<BoxBody<Bytes, std::io::Error>>, std::io::Error> =
+                            Ok(route_cgi(&st, lng, &method, &path, &headers, body));
                         resp
                     }
                 },
@@ -1123,7 +1392,7 @@ mod tests {
     }
 
     async fn scgi_handler<B>(
-        state: Arc<Mutex<State>>,
+        st: &State,
         request: http::Request<B>,
     ) -> Result<http::Response<BoxBody<Bytes, std::io::Error>>, std::io::Error>
     where
@@ -1141,22 +1410,18 @@ mod tests {
             .unwrap_or(0);
         let body = read_body_capped(request.into_body(), content_length).await?;
         let lng = lang_from_headers(&headers);
-        let resp: Result<http::Response<BoxBody<Bytes, std::io::Error>>, std::io::Error> = {
-            let mut st = state.lock().unwrap();
-            Ok(route_cgi(&mut st, lng, &method, &path, &headers, body))
-        };
-        resp
+        Ok(route_cgi(st, lng, &method, &path, &headers, body))
     }
 
     #[tokio::test]
     async fn scgi_roundtrip_serves_home() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let (client_io, server_io) = tokio::io::duplex(1024);
-        let state = Arc::new(Mutex::new(state()));
+        let st = Arc::new(state());
         let handle = tokio::spawn(async move {
             cegla_scgi::server::server_handle_scgi(server_io, move |request| {
-                let state = Arc::clone(&state);
-                async move { scgi_handler(state, request).await }
+                let st = Arc::clone(&st);
+                async move { scgi_handler(&st, request).await }
             })
             .await
             .unwrap();
@@ -1177,11 +1442,11 @@ mod tests {
     async fn scgi_roundtrip_post_admin_validation() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let (client_io, server_io) = tokio::io::duplex(1024);
-        let state = Arc::new(Mutex::new(state()));
+        let st = Arc::new(state());
         let handle = tokio::spawn(async move {
             cegla_scgi::server::server_handle_scgi(server_io, move |request| {
-                let state = Arc::clone(&state);
-                async move { scgi_handler(state, request).await }
+                let st = Arc::clone(&st);
+                async move { scgi_handler(&st, request).await }
             })
             .await
             .unwrap();
