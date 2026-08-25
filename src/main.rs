@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::{self, Write};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{self, Read};
 use std::path::PathBuf;
 
 use actix_web::http::header::{COOKIE, LOCATION};
@@ -16,7 +17,9 @@ use serde::{Deserialize, Serialize};
 
 mod i18n;
 
-use i18n::{Lang, days, days_full, fill, t};
+use i18n::{Lang, days, days_full};
+
+use crate::i18n::{Localized, LocalizedDisplay, LocalizedRef, T, esc};
 
 const DAY_KEYS: [&str; 7] = [
     "monday",
@@ -33,11 +36,17 @@ fn day_index(wd: Weekday) -> usize {
 }
 
 fn day_index_of(day: &str) -> usize {
-    DAY_KEYS.iter().position(|d| *d == day).unwrap_or(DAY_KEYS.len())
+    DAY_KEYS
+        .iter()
+        .position(|d| *d == day)
+        .unwrap_or(DAY_KEYS.len())
 }
 
 fn sort_key(e: &Entry) -> (bool, u32) {
-    (e.weeks.is_empty(), e.weeks.iter().min().copied().unwrap_or(0))
+    (
+        e.weeks.is_empty(),
+        e.weeks.iter().min().copied().unwrap_or(0),
+    )
 }
 
 fn lang_of(req: &HttpRequest) -> Lang {
@@ -166,11 +175,10 @@ impl State {
             .truncate(false)
             .open(db_path)
             .map_err(|e| format!("apertura {:?}: {e}", db_path))?;
-        f.lock()
-            .map_err(|e| format!("lock {:?}: {e}", db_path))?;
+        f.lock().map_err(|e| format!("lock {:?}: {e}", db_path))?;
         f.set_len(0)
             .map_err(|e| format!("scrittura {:?}: {e}", db_path))?;
-        f.write_all(raw.as_bytes())
+        io::Write::write_all(&mut f, raw.as_bytes())
             .map_err(|e| format!("scrittura {:?}: {e}", db_path))?;
         f.sync_all()
             .map_err(|e| format!("sync {:?}: {e}", db_path))?;
@@ -217,161 +225,150 @@ fn load_or_500(data: &AppState) -> Result<State, HttpResponse> {
     })
 }
 
-fn esc(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
+struct Page<Title: LocalizedDisplay, Body: LocalizedDisplay>(Title, Body);
 
-fn page(lng: Lang, title: &str, body: String) -> String {
-    let home = t(lng, "nav_home");
-    let admin = t(lng, "nav_admin");
-    let (other_code, other_label) = if lng == Lang::It {
-        ("en", "EN")
-    } else {
-        ("it", "IT")
-    };
-    format!(
-        r#"<!doctype html>
-<html lang="{html_lang}" style="color-scheme:light dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{title}</title>
-<style>
-body{{font-family:system-ui,sans-serif;max-width:640px;margin:2rem auto;padding:0 1rem;color:#222}}
-table{{border-collapse:collapse;width:100%}}
-th,td{{border:1px solid #ccc;padding:.4rem .6rem;text-align:left}}
-th{{background:#f2f2f2}}
-.now{{background:#e7f6e7;padding:.8rem;border-radius:.5rem;margin:1rem 0}}
-nav a{{margin-right:1rem}}
-.err{{background:#fdecea;color:#b00020;padding:.6rem;border-radius:.5rem}}
-input[type=text]{{width:100%;box-sizing:border-box;padding:.4rem}}
-.field{{display:flex}}
-.field input[type=text]{{flex:1;width:auto;border-right:none;border-radius:.3rem 0 0 .3rem}}
-.field button{{border-radius:0 .3rem .3rem 0}}
-.add-btn{{padding:.05rem .5rem;font-size:.75rem;vertical-align:middle}}
-.weeks input[type=checkbox]{{position:absolute;opacity:0;pointer-events:none}}
-.weeks label{{display:inline-block;padding:.15rem .55rem;margin:0 .2rem .2rem 0;border-radius:.3rem;cursor:pointer;background:#888;color:#fff;font-size:.9rem}}
-.weeks input:checked + label{{background:#2e7d32}}
-.weeks input:checked + label.bad{{background:#c62828}}
-form p{{margin:.6rem 0}}
-button{{padding:.5rem 1.2rem;cursor:pointer}}
-@media (prefers-color-scheme:dark) {{
-body{{color:#ddd;background:#1e1e1e}}
-th,td{{border-color:#444}}
-th{{background:#2a2a2a}}
-.now{{background:#1e3a2b}}
-.err{{background:#4a1f1f;color:#ffb4ab}}
-a{{color:#8ab4f8}}
-}}
-</style></head><body>
-<nav><a href="/">{home}</a><a href="/admin">{admin}</a><span style="float:right"><a href="/lang/{other_code}">{other_label}</a></span></nav>
-{body}
-</body></html>"#,
-        html_lang = lng.code(),
-        title = title,
-        home = home,
-        admin = admin,
-        other_code = other_code,
-        other_label = other_label,
-        body = body,
-    )
-}
+impl<Title: LocalizedDisplay, Body: LocalizedDisplay> LocalizedDisplay for Page<Title, Body> {
+    fn fmt(&self, lng: Lang, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let other_lang = if lng == Lang::It { Lang::En } else { Lang::It };
+        f.write_str(concat!("<!doctype html>", "<html lang=\""))?;
+        fmt::Display::fmt(&lng, f)?;
+        f.write_str(concat!(
+            "\" style=\"color-scheme:light dark\">",
+            "<head><meta charset=\"utf-8\">",
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
+            "<title>"
+        ))?;
+        fmt::Display::fmt(&esc(LocalizedRef::from((lng, &self.0))), f)?;
+        f.write_str(concat!(
+            "</title>",
+            "<style>",
+            "body{font-family:system-ui,sans-serif;max-width:640px;margin:2rem auto;padding:0 1rem;color:#222}",
+            "table{border-collapse:collapse;width:100%}",
+            "th,td{border:1px solid #ccc;padding:.4rem .6rem;text-align:left}",
+            "th{background:#f2f2f2}",
+            ".now{background:#e7f6e7;padding:.8rem;border-radius:.5rem;margin:1rem 0}",
+            "nav a{margin-right:1rem}",
+            ".err{background:#fdecea;color:#b00020;padding:.6rem;border-radius:.5rem}",
+            "input[type=text]{width:100%;box-sizing:border-box;padding:.4rem}",
+            ".field{display:flex}",
+            ".field input[type=text]{flex:1;width:auto;border-right:none;border-radius:.3rem 0 0 .3rem}",
+            ".field button{border-radius:0 .3rem .3rem 0}",
+            ".add-btn{padding:.05rem .5rem;font-size:.75rem;vertical-align:middle}",
+            ".weeks input[type=checkbox]{position:absolute;opacity:0;pointer-events:none}",
+            ".weeks label{display:inline-block;padding:.15rem .55rem;margin:0 .2rem .2rem 0;border-radius:.3rem;cursor:pointer;background:#888;color:#fff;font-size:.9rem}",
+            ".weeks input:checked + label{background:#2e7d32}",
+            ".weeks input:checked + label.bad{background:#c62828}",
+            "form p{margin:.6rem 0}",
+            "button{padding:.5rem 1.2rem;cursor:pointer}",
+            "@media (prefers-color-scheme:dark) {",
+            "body{color:#ddd;background:#1e1e1e}",
+            "th,td{border-color:#444}",
+            "th{background:#2a2a2a}",
+            ".now{background:#1e3a2b}",
+            ".err{background:#4a1f1f;color:#ffb4ab}",
+            "a{color:#8ab4f8}",
+            "}",
+            "</style></head><body>",
+        ))?;
 
-fn fmt_dt(lng: Lang, dt: DateTime<Tz>) -> String {
-    let day = days(lng)[day_index(dt.weekday())];
-    match lng {
-        Lang::It => format!("{day} {} alle {}", dt.format("%d/%m"), dt.format("%H:%M")),
-        Lang::En => format!("{day} {} at {}", dt.format("%m/%d"), dt.format("%H:%M")),
+        f.write_str("<nav><a href=\"/\">")?;
+        fmt::Display::fmt(&Localized::from((lng, T::NavHome)), f)?;
+        f.write_str("</a><a href=\"/admin\">")?;
+        fmt::Display::fmt(&Localized::from((lng, T::NavAdmin)), f)?;
+        f.write_str(concat!(
+            "</a>",
+            "<span style=\"float:right\"><a href=\"/lang/"
+        ))?;
+        fmt::Display::fmt(&other_lang, f)?;
+        f.write_str("\">")?;
+        fmt::Debug::fmt(&other_lang, f)?;
+        f.write_str("</a></span></nav>")?;
+        fmt::Display::fmt(&LocalizedRef::from((lng, &self.1)), f)?;
+        f.write_str("</body></html>")
     }
 }
 
-fn now_it(lng: Lang) -> String {
-    match lng {
-        Lang::It => Utc::now().format("%d/%m").to_string(),
-        Lang::En => Utc::now().format("%m/%d").to_string(),
-    }
-}
+pub struct HomeHtml<'a>(&'a State);
 
-fn home_html(st: &State, lng: Lang) -> String {
-    let now = Utc::now().with_timezone(&st.timezone);
-    let pickup = st.pickup_time;
-    let (open_date, _owd, open_type) = st.next_boundary(now);
-    let today_type = st.type_for(now.date_naive());
+impl<'a> LocalizedDisplay for HomeHtml<'a> {
+    fn fmt(&self, lng: Lang, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let now = Utc::now().with_timezone(&self.0.timezone);
+        let pickup = self.0.pickup_time;
+        let (open_date, _owd, open_type) = self.0.next_boundary(now);
+        let today_type = self.0.type_for(now.date_naive());
 
-    let open_dt = open_date
-        .and_time(pickup)
-        .and_local_timezone(st.timezone)
-        .earliest()
-        .expect("boundary locale non risolvibile");
+        let open_dt = open_date
+            .and_time(pickup)
+            .and_local_timezone(self.0.timezone)
+            .earliest()
+            .expect("boundary locale non risolvibile");
 
-    let open_row = if open_type.is_empty() {
-        let s = fmt_dt(lng, open_dt);
-        format!("<p>{}</p>", esc(&fill(t(lng, "pause"), &[s.as_str()])))
-    } else {
-        let s = fmt_dt(lng, open_dt);
-        format!(
-            "<p><strong>{}</strong></p><p>{}</p>",
-            esc(&fill(t(lng, "now_open"), &[open_type.as_str()])),
-            esc(&fill(t(lng, "window_until"), &[s.as_str()])),
-        )
-    };
+        f.write_str("<h1>")?;
+        fmt::Display::fmt(&esc(Localized::from((lng, T::TitleHome))), f)?;
+        f.write_str("</h1>")?;
 
-    let today_line = if today_type.is_empty() {
-        let d = now_it(lng);
-        format!("<p>{}</p>", esc(&fill(t(lng, "today_none"), &[d.as_str()])))
-    } else {
-        let d = now_it(lng);
-        let tm = pickup.format("%H:%M").to_string();
-        format!(
-            "<p>{}</p>",
-            esc(&fill(
-                t(lng, "today_pickup"),
-                &[d.as_str(), today_type.as_str(), tm.as_str()],
-            ))
-        )
-    };
+        f.write_str("<div class=\"now\"><p>")?;
+        if open_type.is_empty() {
+            fmt::Display::fmt(&esc(Localized::from((lng, T::Pause(open_dt)))), f)?;
+        } else {
+            f.write_str("<strong>")?;
+            fmt::Display::fmt(&esc(Localized::from((lng, T::NowOpen(&open_type)))), f)?;
+            f.write_str("</strong></p><p>")?;
+            fmt::Display::fmt(&esc(Localized::from((lng, T::WindowUntil(open_dt)))), f)?;
+        }
+        f.write_str("</p></div>")?;
 
-    let dnames = days(lng);
-    let monday = now.date_naive() - Duration::days(day_index(now.weekday()) as i64);
-    let rows = (0..7)
-        .map(|i| {
+        f.write_str("<p>")?;
+        if today_type.is_empty() {
+            fmt::Display::fmt(
+                &esc(Localized::from((lng, T::TodayNone(self.0.timezone)))),
+                f,
+            )?;
+        } else {
+            fmt::Display::fmt(
+                &esc(Localized::from((
+                    lng,
+                    T::TodayPickup(self.0.timezone, &today_type, pickup),
+                ))),
+                f,
+            )?;
+        }
+        f.write_str(concat!("</p>", "<h2>"))?;
+        fmt::Display::fmt(&esc(Localized::from((lng, T::Week(now.date_naive())))), f)?;
+        f.write_str(concat!("</h2>", "<table><tr><th>"))?;
+        fmt::Display::fmt(&esc(Localized::from((lng, T::ColDay))), f)?;
+        f.write_str("</th><th>")?;
+        fmt::Display::fmt(&esc(Localized::from((lng, T::ColType))), f)?;
+        f.write_str("</th><th>")?;
+        fmt::Display::fmt(&esc(Localized::from((lng, T::ColWindow))), f)?;
+        f.write_str("</th></tr>")?;
+        let dnames = days(lng);
+        let monday = now.date_naive() - Duration::days(day_index(now.weekday()) as i64);
+        for i in 0..7 {
             let d = monday + Duration::days(i);
-            let ty = st.type_for(d);
+            let ty = self.0.type_for(d);
             let wi = day_index(d.weekday());
-            format!(
-                "<tr><td>{}</td><td>{}</td><td>{} {} → {} {}</td></tr>",
-                dnames[wi],
-                if ty.is_empty() {
-                    "—".to_string()
-                } else {
-                    esc(&ty)
-                },
-                dnames[(wi + 6) % 7],
-                pickup.format("%H:%M"),
-                dnames[wi],
-                pickup.format("%H:%M")
-            )
-        })
-        .collect::<String>();
 
-    format!(
-        r#"<h1>{title_home}</h1>
-<div class="now">{open_row}</div>
-{today_line}
-<h2>{week}</h2>
-<table><tr><th>{col_day}</th><th>{col_type}</th><th>{col_window}</th></tr>{rows}</table>"#,
-        title_home = esc(t(lng, "title_home")),
-        week = esc(&fill(
-            t(lng, "week"),
-            &[&week_of_month(now.date_naive()).to_string()],
-        )),
-        col_day = esc(t(lng, "col_day")),
-        col_type = esc(t(lng, "col_type")),
-        col_window = esc(t(lng, "col_window")),
-        open_row = open_row,
-        today_line = today_line,
-        rows = rows
-    )
+            f.write_str("<tr><td>")?;
+            f.write_str(dnames[wi])?;
+            f.write_str("</td><td>")?;
+            if ty.is_empty() {
+                f.write_char('—')?;
+            } else {
+                fmt::Display::fmt(&esc(&ty), f)?;
+            }
+            f.write_str("</td><td>")?;
+            f.write_str(dnames[(wi + 6) % 7])?;
+            f.write_char(' ')?;
+            fmt::Display::fmt(&pickup.format("%H:%M"), f)?;
+            f.write_str(" → ")?;
+            f.write_str(dnames[wi])?;
+            f.write_char(' ')?;
+            fmt::Display::fmt(&pickup.format("%H:%M"), f)?;
+            f.write_str("</td></tr>")?;
+        }
+        f.write_str("</table>")
+    }
 }
 
 async fn home(req: HttpRequest, data: web::Data<AppState>) -> HttpResponse {
@@ -382,7 +379,7 @@ async fn home(req: HttpRequest, data: web::Data<AppState>) -> HttpResponse {
     };
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
-        .body(page(lng, t(lng, "title_home"), home_html(&st, lng)))
+        .body(Localized::from((lng, Page(T::TitleHome, HomeHtml(&st)))).to_string())
 }
 
 fn admin_form_from_state(st: &State) -> AdminForm {
@@ -402,11 +399,16 @@ async fn admin_get(req: HttpRequest, data: web::Data<AppState>) -> HttpResponse 
     };
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
-        .body(page(
-            lng,
-            t(lng, "title_admin"),
-            admin_form_html(lng, admin_form_from_state(&st), FormErrors::default()),
-        ))
+        .body(
+            Localized::from((
+                lng,
+                Page(
+                    T::TitleAdmin,
+                    AdminFormHtml(admin_form_from_state(&st), FormErrors::default()),
+                ),
+            ))
+            .to_string(),
+        )
 }
 
 struct AdminForm {
@@ -422,101 +424,176 @@ struct FormErrors {
     bad_weeks: HashMap<String, Vec<u32>>,
 }
 
-fn row_html(day: &str, idx: usize, e: &Entry, errs: &FormErrors) -> String {
-    let row_key = format!("{day}:{idx}");
-    let bad = errs.bad_weeks.get(&row_key).map(Vec::as_slice).unwrap_or(&[]);
-    let week_checks = (1..=5)
-        .map(|w| {
-            let ck = if e.weeks.contains(&w) { " checked" } else { "" };
-            let cls = if bad.contains(&w) { " class=\"bad\"" } else { "" };
-            format!(
-                "<input type=\"checkbox\" id=\"{day}_w{idx}_{w}\" name=\"{day}_weeks_{idx}\" value=\"{w}\"{ck}>\
-                 <label for=\"{day}_w{idx}_{w}\"{cls}>{w}</label>"
-            )
-        })
-        .collect::<String>();
-    format!(
-        "<p><span class=\"weeks\">{week_checks}</span> <span class=\"field\">\
-         <input type=\"text\" name=\"{day}_type_{idx}\" value=\"{}\">\
-         <button type=\"submit\" name=\"del\" value=\"{day}:{idx}\">-</button></span></p>{}",
-        esc(&e.kind),
-        errs.fields
-            .get(&row_key)
-            .map(|e| format!("<span class=\"err\">{}</span>", esc(e)))
-            .unwrap_or_default(),
-    )
-}
-
-fn admin_form_html(lng: Lang, f: AdminForm, errs: FormErrors) -> String {
-    let err_html = errs
-        .fields
-        .get("form")
-        .map(|e| format!("<p class=\"err\">{}</p>", esc(e)))
-        .unwrap_or_default();
-    let full = days_full(lng);
-    let mut days_html = String::new();
-    for (di, day) in DAY_KEYS.iter().enumerate() {
-        let mut rows = String::new();
-        let mut day_entries: Vec<&Entry> = f.entries.iter().filter(|e| e.day == *day).collect();
-        day_entries.sort_by_key(|e| sort_key(e));
-        for (idx, e) in day_entries.iter().enumerate() {
-            rows += &row_html(day, idx, e, &errs);
-        }
-        days_html += &format!(
-            "<h3>{} <button type=\"submit\" class=\"add-btn\" name=\"add\" value=\"{day}\">+</button></h3>{rows}",
-            full[di]
-        );
+fn row_html2<'a>(
+    day: &'a str,
+    idx: usize,
+    e: &'a Entry,
+    errs: &'a FormErrors,
+) -> impl fmt::Display + 'a {
+    struct RowHtml<'a> {
+        day: &'a str,
+        idx: usize,
+        e: &'a Entry,
+        errs: &'a FormErrors,
     }
-    let tz_options = TZ_VARIANTS
-        .iter()
-        .map(|tz| {
-            let name = tz.to_string();
-            let sel = if name == f.timezone { " selected" } else { "" };
-            format!(
-                "<option value=\"{}\"{}>{}</option>",
-                esc(&name),
-                sel,
-                esc(&name)
-            )
-        })
-        .collect::<String>();
-    format!(
-        r#"<h1>{title}</h1>
-{err_html}
-<form method="post" action="/admin">
-<p><label>{plabel}<br><input type="text" name="pickup_time" value="{pt}"></label>{pt_err}</p>
-<p><label>{tzlabel}<br><select name="timezone">{tzopts}</select></label>{tz_err}</p>
-{days_html}
-<p><em>{hint}</em></p>
-<p><button type="submit" name="save">{save}</button></p>
-</form>"#,
-        title = esc(t(lng, "title_admin")),
-        plabel = esc(t(lng, "pickup_time_label")),
-        tzlabel = esc(t(lng, "tz_label")),
-        hint = esc(t(lng, "empty_hint")),
-        save = esc(t(lng, "save")),
-        pt = esc(&f.pickup_time),
-        pt_err = errs.fields.get("pickup_time").map(|e| format!("<span class=\"err\">{}</span>", esc(e))).unwrap_or_default(),
-        tz_err = errs.fields.get("timezone").map(|e| format!("<span class=\"err\">{}</span>", esc(e))).unwrap_or_default(),
-        tzopts = tz_options,
-        days_html = days_html,
-    )
+
+    impl<'a> fmt::Display for RowHtml<'a> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            let row_key = format!("{}:{}", self.day, self.idx);
+            let bad = self
+                .errs
+                .bad_weeks
+                .get(&row_key)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            f.write_str("<p><span class=\"weeks\">")?;
+            for w in 1..=5 {
+                f.write_str("<input type=\"checkbox\" id=\"")?;
+                fmt::Display::fmt(&self.day, f)?;
+                f.write_str("_w")?;
+                fmt::Display::fmt(&self.idx, f)?;
+                f.write_char('_')?;
+                fmt::Display::fmt(&w, f)?;
+                f.write_str("\" name=\"")?;
+                fmt::Display::fmt(&self.day, f)?;
+                f.write_str("_weeks_")?;
+                fmt::Display::fmt(&self.idx, f)?;
+                f.write_str("\" value=\"")?;
+                fmt::Display::fmt(&w, f)?;
+                f.write_char('"')?;
+                if self.e.weeks.contains(&w) {
+                    f.write_str(" checked")?;
+                }
+                if bad.contains(&w) {
+                    f.write_str(" class=\"bad\"")?;
+                }
+                f.write_char('>')?;
+
+                f.write_str("<label for=\"")?;
+                fmt::Display::fmt(&self.day, f)?;
+                f.write_str("_w")?;
+                fmt::Display::fmt(&self.idx, f)?;
+                f.write_char('_')?;
+                fmt::Display::fmt(&w, f)?;
+                f.write_char('"')?;
+                if bad.contains(&w) {
+                    f.write_str(" class=\"bad\"")?;
+                }
+                f.write_char('>')?;
+                fmt::Display::fmt(&w, f)?;
+                f.write_str("</label>")?;
+            }
+            f.write_str("</span> <span class=\"field\">")?;
+            f.write_str("<input type=\"text\" name=\"")?;
+            fmt::Display::fmt(&self.day, f)?;
+            f.write_str("_type_")?;
+            fmt::Display::fmt(&self.idx, f)?;
+            f.write_str("\" value=\"")?;
+            fmt::Display::fmt(&esc(&self.e.kind), f)?;
+            f.write_str("\">")?;
+            f.write_str("<button type=\"submit\" name=\"del\" value=\"")?;
+            fmt::Display::fmt(&self.day, f)?;
+            f.write_char(':')?;
+            fmt::Display::fmt(&self.idx, f)?;
+            f.write_str("\">-</button></span></p>")?;
+            if let Some(e) = self.errs.fields.get(&row_key) {
+                f.write_str("<span class=\"err\">")?;
+                fmt::Display::fmt(&esc(e), f)?;
+                f.write_str("</span>")?;
+            }
+            Ok(())
+        }
+    }
+
+    RowHtml { day, idx, e, errs }
 }
 
-fn validate_and_save(
-    db_path: &PathBuf,
-    f: &AdminForm,
-    lng: Lang,
-) -> Result<(), FormErrors> {
+struct AdminFormHtml(AdminForm, FormErrors);
+
+impl LocalizedDisplay for AdminFormHtml {
+    fn fmt(&self, lng: Lang, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<h1>")?;
+        fmt::Display::fmt(&esc(Localized::from((lng, T::TitleAdmin))), f)?;
+        f.write_str("</h1>")?;
+        if let Some(form_err) = self.1.fields.get("form") {
+            f.write_str("<p class=\"err\">")?;
+            fmt::Display::fmt(&esc(form_err), f)?;
+            f.write_str("</p>")?;
+        }
+        f.write_str("<form method=\"post\" action=\"/admin\">")?;
+        f.write_str("<p><label>")?;
+        fmt::Display::fmt(&esc(Localized::from((lng, T::PickupTimeLabel))), f)?;
+        f.write_str("<br><input type=\"text\" name=\"pickup_time\" value=\"")?;
+        fmt::Display::fmt(&esc(&self.0.pickup_time), f)?;
+        f.write_str("\"></label>")?;
+        if let Some(err) = self.1.fields.get("pickup_time") {
+            f.write_str("<span class=\"err\">")?;
+            fmt::Display::fmt(&esc(err), f)?;
+            f.write_str("</span>")?;
+        }
+        f.write_str("<p><label>")?;
+        fmt::Display::fmt(&esc(Localized::from((lng, T::TzLabel))), f)?;
+        f.write_str("<br><select name=\"timezone\">")?;
+        for tz in TZ_VARIANTS.iter() {
+            f.write_str("<option value=\"")?;
+            fmt::Display::fmt(&esc(tz), f)?;
+            f.write_str("\"")?;
+            if tz.name() == self.0.timezone {
+                f.write_str(" selected")?;
+            }
+            fmt::Display::fmt(&esc(tz), f)?;
+            f.write_char('>')?;
+            fmt::Display::fmt(&esc(tz), f)?;
+            f.write_str("</option>")?;
+        }
+        f.write_str("</select></label>")?;
+        if let Some(err) = self.1.fields.get("timezone") {
+            f.write_str("<span class=\"err\">")?;
+            fmt::Display::fmt(&esc(err), f)?;
+            f.write_str("</span>")?;
+        }
+        f.write_str("</p>")?;
+
+        let full = days_full(lng);
+        for (di, day) in DAY_KEYS.iter().enumerate() {
+            let mut day_entries: Vec<&Entry> =
+                self.0.entries.iter().filter(|e| e.day == *day).collect();
+            day_entries.sort_by_key(|e| sort_key(e));
+
+            f.write_str("<h3>")?;
+            f.write_str(full[di])?;
+            f.write_str("<button type=\"submit\" class=\"add-btn\" name=\"add\" value=\"")?;
+            f.write_str(day)?;
+            f.write_str("\">+</button></h3>")?;
+
+            for (idx, e) in day_entries.iter().enumerate() {
+                fmt::Display::fmt(&row_html2(day, idx, e, &self.1), f)?;
+            }
+        }
+
+        f.write_str("<p><em>")?;
+        fmt::Display::fmt(&esc(Localized::from((lng, T::EmptyHint))), f)?;
+        f.write_str(concat!(
+            "</em></p>",
+            "<p><button type=\"submit\" name=\"save\">"
+        ))?;
+        fmt::Display::fmt(&esc(Localized::from((lng, T::Save))), f)?;
+        f.write_str(concat!("</button></p>", "</form>"))
+    }
+}
+
+fn validate_and_save(db_path: &PathBuf, f: &AdminForm, lng: Lang) -> Result<(), FormErrors> {
     let mut errs = FormErrors::default();
     if let Err(e) = f.timezone.parse::<Tz>() {
-        errs.fields
-            .insert("timezone".to_string(), format!("{}: {e}", t(lng, "err_tz")));
+        errs.fields.insert(
+            "timezone".to_string(),
+            format!("{}: {e}", Localized::from((lng, T::ErrTz))),
+        );
     }
     if let Err(e) = NaiveTime::parse_from_str(&f.pickup_time, "%H:%M") {
         errs.fields.insert(
             "pickup_time".to_string(),
-            format!("{}: {e}", t(lng, "err_time")),
+            format!("{}: {e}", Localized::from((lng, T::ErrTime))),
         );
     }
     let mut schedule: Vec<Entry> = Vec::new();
@@ -527,8 +604,12 @@ fn validate_and_save(
         for (idx, e) in day_entries.iter().enumerate() {
             if !e.kind.trim().is_empty() {
                 let di = day_index_of(day);
-                let mut weeks: Vec<u32> =
-                    e.weeks.iter().copied().filter(|w| (1..=5).contains(w)).collect();
+                let mut weeks: Vec<u32> = e
+                    .weeks
+                    .iter()
+                    .copied()
+                    .filter(|w| (1..=5).contains(w))
+                    .collect();
                 weeks.sort_unstable();
                 weeks.dedup();
                 if !weeks.is_empty() {
@@ -536,7 +617,8 @@ fn validate_and_save(
                         if !seen.insert((e.day.clone(), *w)) {
                             let key = format!("{day}:{idx}");
                             errs.fields.entry(key.clone()).or_insert_with(|| {
-                                fill(t(lng, "err_overlap"), &[days_full(lng)[di], &w.to_string()])
+                                Localized::from((lng, T::ErrOverlap(days_full(lng)[di], *w)))
+                                    .to_string()
                             });
                             errs.bad_weeks.entry(key).or_default().push(*w);
                         }
@@ -554,13 +636,16 @@ fn validate_and_save(
         return Err(errs);
     }
     let db = Db {
-        timezone: f.timezone.clone(),
-        pickup_time: f.pickup_time.clone(),
+        timezone: f.timezone.to_string(),
+        pickup_time: f.pickup_time.to_string(),
         schedule,
     };
     if let Err(e) = State::save_file(db_path, &db) {
         let mut errs = FormErrors::default();
-        errs.fields.insert("form".to_string(), format!("{}: {e}", t(lng, "err_io")));
+        errs.fields.insert(
+            "form".to_string(),
+            format!("{}: {e}", Localized::from((lng, T::ErrIo))),
+        );
         return Err(errs);
     }
     Ok(())
@@ -611,17 +696,21 @@ async fn admin_post(req: HttpRequest, data: web::Data<AppState>, body: web::Byte
     match process_admin(f, &data.0, lng) {
         Ok(Some(form)) => HttpResponse::Ok()
             .content_type("text/html; charset=utf-8")
-            .body(page(
-                lng,
-                t(lng, "title_admin"),
-                admin_form_html(lng, form, FormErrors::default()),
-            )),
+            .body(
+                Localized::from((
+                    lng,
+                    Page(T::TitleAdmin, AdminFormHtml(form, FormErrors::default())),
+                ))
+                .to_string(),
+            ),
         Ok(None) => HttpResponse::SeeOther()
             .insert_header((LOCATION, "/"))
             .finish(),
         Err((form, errs)) => HttpResponse::BadRequest()
             .content_type("text/html; charset=utf-8")
-            .body(page(lng, t(lng, "title_admin"), admin_form_html(lng, form, errs))),
+            .body(
+                Localized::from((lng, Page(T::TitleAdmin, AdminFormHtml(form, errs)))).to_string(),
+            ),
     }
 }
 
@@ -749,18 +838,15 @@ fn cli_cmd(db_path: PathBuf) -> Result<(), String> {
         .and_local_timezone(st.timezone)
         .earliest()
         .expect("boundary locale non risolvibile");
-    let line = if open_type.is_empty() {
-        let s = fmt_dt(lng, open_dt);
-        fill(t(lng, "pause"), &[s.as_str()])
+    if open_type.is_empty() {
+        println!("{}", Localized::from((lng, T::Pause(open_dt))));
     } else {
-        let s = fmt_dt(lng, open_dt);
-        format!(
+        println!(
             "{} ({})",
-            fill(t(lng, "now_open"), &[open_type.as_str()]),
-            fill(t(lng, "window_until"), &[s.as_str()]),
-        )
-    };
-    println!("{line}");
+            Localized::from((lng, T::NowOpen(&open_type))),
+            Localized::from((lng, T::WindowUntil(open_dt)))
+        );
+    }
     Ok(())
 }
 
@@ -791,7 +877,10 @@ fn lang_from_headers(h: &http::HeaderMap) -> Lang {
 fn form_from_body(body: &[u8]) -> AdminForm {
     let mut groups: HashMap<String, Vec<String>> = HashMap::new();
     for (k, v) in form_urlencoded::parse(body) {
-        groups.entry(k.into_owned()).or_default().push(v.into_owned());
+        groups
+            .entry(k.into_owned())
+            .or_default()
+            .push(v.into_owned());
     }
     let get = |key: &str| {
         groups
@@ -826,6 +915,7 @@ fn form_from_body(body: &[u8]) -> AdminForm {
     } else {
         String::new()
     };
+
     AdminForm {
         timezone: get("timezone"),
         pickup_time: get("pickup_time"),
@@ -892,25 +982,33 @@ fn route_cgi(
             let f = form_from_body(&body);
             return match process_admin(f, &st.db_path, lng) {
                 Ok(Some(form)) => {
-                    let html =
-                        page(lng, t(lng, "title_admin"), admin_form_html(lng, form, FormErrors::default()));
+                    let html = Localized::from((
+                        lng,
+                        Page(T::TitleAdmin, AdminFormHtml(form, FormErrors::default())),
+                    ))
+                    .to_string();
                     respond(StatusCode::OK, html)
                 }
                 Ok(None) => redirect("/", None),
                 Err((form, errs)) => {
-                    let html = page(lng, t(lng, "title_admin"), admin_form_html(lng, form, errs));
+                    let html =
+                        Localized::from((lng, Page(T::TitleAdmin, AdminFormHtml(form, errs))))
+                            .to_string();
                     respond(StatusCode::BAD_REQUEST, html)
                 }
             };
         }
-        let html = page(
+        let html = Localized::from((
             lng,
-            t(lng, "title_admin"),
-            admin_form_html(lng, admin_form_from_state(st), FormErrors::default()),
-        );
+            Page(
+                T::TitleAdmin,
+                AdminFormHtml(admin_form_from_state(st), FormErrors::default()),
+            ),
+        ))
+        .to_string();
         return respond(StatusCode::OK, html);
     }
-    let html = page(lng, t(lng, "title_home"), home_html(st, lng));
+    let html = Localized::from((lng, Page(T::TitleHome, HomeHtml(st)))).to_string();
     respond(StatusCode::OK, html)
 }
 
@@ -960,7 +1058,9 @@ struct TokioRt;
 
 impl cegla_fcgi::server::Runtime for TokioRt {
     fn spawn(&self, future: impl std::future::Future + Send + 'static) {
-        tokio::spawn(async move { future.await; });
+        tokio::spawn(async move {
+            future.await;
+        });
     }
 }
 
@@ -999,10 +1099,8 @@ async fn fcgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
         let (stream, _) = listener.accept().await?;
         let db = db.clone();
         tokio::spawn(async move {
-            let _ = cegla_fcgi::server::server_handle_fcgi(
-                stream,
-                TokioRt,
-                move |request, _stderr| {
+            let _ =
+                cegla_fcgi::server::server_handle_fcgi(stream, TokioRt, move |request, _stderr| {
                     let db = db.clone();
                     async move {
                         let method = request.method().clone();
@@ -1016,13 +1114,14 @@ async fn fcgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
                         let body = read_body_capped(request.into_body(), content_length).await?;
                         let lng = lang_from_headers(&headers);
                         let st = State::load(db).map_err(std::io::Error::other)?;
-                        let resp: Result<http::Response<BoxBody<Bytes, std::io::Error>>, std::io::Error> =
-                            Ok(route_cgi(&st, lng, &method, &path, &headers, body));
+                        let resp: Result<
+                            http::Response<BoxBody<Bytes, std::io::Error>>,
+                            std::io::Error,
+                        > = Ok(route_cgi(&st, lng, &method, &path, &headers, body));
                         resp
                     }
-                },
-            )
-            .await;
+                })
+                .await;
         });
     }
 }
@@ -1034,28 +1133,27 @@ async fn scgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
         let (stream, _) = listener.accept().await?;
         let db = db.clone();
         tokio::spawn(async move {
-            let _ = cegla_scgi::server::server_handle_scgi(
-                stream,
-                move |request| {
-                    let db = db.clone();
-                    async move {
-                        let method = request.method().clone();
-                        let path = request.uri().path().to_string();
-                        let headers = request.headers().clone();
-                        let content_length = headers
-                            .get(http::header::CONTENT_LENGTH)
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|v| v.parse::<usize>().ok())
-                            .unwrap_or(0);
-                        let body = read_body_capped(request.into_body(), content_length).await?;
-                        let lng = lang_from_headers(&headers);
-                        let st = State::load(db).map_err(std::io::Error::other)?;
-                        let resp: Result<http::Response<BoxBody<Bytes, std::io::Error>>, std::io::Error> =
-                            Ok(route_cgi(&st, lng, &method, &path, &headers, body));
-                        resp
-                    }
-                },
-            )
+            let _ = cegla_scgi::server::server_handle_scgi(stream, move |request| {
+                let db = db.clone();
+                async move {
+                    let method = request.method().clone();
+                    let path = request.uri().path().to_string();
+                    let headers = request.headers().clone();
+                    let content_length = headers
+                        .get(http::header::CONTENT_LENGTH)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let body = read_body_capped(request.into_body(), content_length).await?;
+                    let lng = lang_from_headers(&headers);
+                    let st = State::load(db).map_err(std::io::Error::other)?;
+                    let resp: Result<
+                        http::Response<BoxBody<Bytes, std::io::Error>>,
+                        std::io::Error,
+                    > = Ok(route_cgi(&st, lng, &method, &path, &headers, body));
+                    resp
+                }
+            })
             .await;
         });
     }
@@ -1209,28 +1307,26 @@ mod tests {
         let (client_io, server_io) = tokio::io::duplex(1024);
         let st = Arc::new(state());
         let handle = tokio::spawn(async move {
-            cegla_fcgi::server::server_handle_fcgi(
-                server_io,
-                TokioRt,
-                move |request, _stderr| {
-                    let st = Arc::clone(&st);
-                    async move {
-                        let method = request.method().clone();
-                        let path = request.uri().path().to_string();
-                        let headers = request.headers().clone();
-                        let content_length = headers
-                            .get(http::header::CONTENT_LENGTH)
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|v| v.parse::<usize>().ok())
-                            .unwrap_or(0);
-                        let body = read_body_capped(request.into_body(), content_length).await?;
-                        let lng = lang_from_headers(&headers);
-                        let resp: Result<http::Response<BoxBody<Bytes, std::io::Error>>, std::io::Error> =
-                            Ok(route_cgi(&st, lng, &method, &path, &headers, body));
-                        resp
-                    }
-                },
-            )
+            cegla_fcgi::server::server_handle_fcgi(server_io, TokioRt, move |request, _stderr| {
+                let st = Arc::clone(&st);
+                async move {
+                    let method = request.method().clone();
+                    let path = request.uri().path().to_string();
+                    let headers = request.headers().clone();
+                    let content_length = headers
+                        .get(http::header::CONTENT_LENGTH)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let body = read_body_capped(request.into_body(), content_length).await?;
+                    let lng = lang_from_headers(&headers);
+                    let resp: Result<
+                        http::Response<BoxBody<Bytes, std::io::Error>>,
+                        std::io::Error,
+                    > = Ok(route_cgi(&st, lng, &method, &path, &headers, body));
+                    resp
+                }
+            })
             .await
             .unwrap();
         });
@@ -1292,28 +1388,26 @@ mod tests {
         let (client_io, server_io) = tokio::io::duplex(1024);
         let st = Arc::new(state());
         let handle = tokio::spawn(async move {
-            cegla_fcgi::server::server_handle_fcgi(
-                server_io,
-                TokioRt,
-                move |request, _stderr| {
-                    let st = Arc::clone(&st);
-                    async move {
-                        let method = request.method().clone();
-                        let path = request.uri().path().to_string();
-                        let headers = request.headers().clone();
-                        let content_length = headers
-                            .get(http::header::CONTENT_LENGTH)
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|v| v.parse::<usize>().ok())
-                            .unwrap_or(0);
-                        let body = read_body_capped(request.into_body(), content_length).await?;
-                        let lng = lang_from_headers(&headers);
-                        let resp: Result<http::Response<BoxBody<Bytes, std::io::Error>>, std::io::Error> =
-                            Ok(route_cgi(&st, lng, &method, &path, &headers, body));
-                        resp
-                    }
-                },
-            )
+            cegla_fcgi::server::server_handle_fcgi(server_io, TokioRt, move |request, _stderr| {
+                let st = Arc::clone(&st);
+                async move {
+                    let method = request.method().clone();
+                    let path = request.uri().path().to_string();
+                    let headers = request.headers().clone();
+                    let content_length = headers
+                        .get(http::header::CONTENT_LENGTH)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let body = read_body_capped(request.into_body(), content_length).await?;
+                    let lng = lang_from_headers(&headers);
+                    let resp: Result<
+                        http::Response<BoxBody<Bytes, std::io::Error>>,
+                        std::io::Error,
+                    > = Ok(route_cgi(&st, lng, &method, &path, &headers, body));
+                    resp
+                }
+            })
             .await
             .unwrap();
         });
@@ -1337,7 +1431,9 @@ mod tests {
             ("REQUEST_URI", "/admin"),
             ("CONTENT_LENGTH", &body.len().to_string()),
         ] {
-            params.extend_from_slice(&NameValuePair::new(k.as_bytes().to_vec(), v.as_bytes().to_vec()).encode());
+            params.extend_from_slice(
+                &NameValuePair::new(k.as_bytes().to_vec(), v.as_bytes().to_vec()).encode(),
+            );
         }
         client_write
             .send(Record::new(RecordType::Params as u8, 1, params))

@@ -1,3 +1,8 @@
+use std::fmt::{self, Write};
+
+use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc, Weekday};
+use chrono_tz::Tz;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
     It,
@@ -25,75 +30,224 @@ impl Lang {
             _ => Lang::En,
         }
     }
+}
 
-    pub fn code(self) -> &'static str {
-        match self {
+impl fmt::Display for Lang {
+    #[inline(always)]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
             Lang::It => "it",
             Lang::En => "en",
-        }
+        })
+    }
+}
+
+impl fmt::Debug for Lang {
+    #[inline(always)]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Lang::It => "IT",
+            Lang::En => "EN",
+        })
     }
 }
 
 fn parse_cookie_lang(cookie: &str) -> Option<Lang> {
     cookie.split(';').find_map(|part| {
         let (k, v) = part.trim().split_once('=')?;
-        (k == "lang").then(|| match v {
+        (k == "lang").then_some(match v {
             "it" => Lang::It,
             _ => Lang::En,
         })
     })
 }
 
-pub fn t(lng: Lang, key: &str) -> &'static str {
-    match lng {
-        Lang::It => match key {
-            "title_home" => "Differenziata",
-            "title_admin" => "Backoffice",
-            "nav_home" => "Home",
-            "nav_admin" => "Backoffice",
-            "now_open" => "Adesso puoi buttare: {}",
-            "window_until" => "Finestra aperta fino a {}.",
-            "pause" => "Pausa: nessun ritiro in corso. Prossima raccolta da {}.",
-            "today_pickup" => "Oggi ({}) ritirano: {} alle {}",
-            "today_none" => "Oggi ({}) nessun ritiro.",
-            "week" => "{}ª settimana",
-            "col_day" => "Giorno",
-            "col_type" => "Tipo",
-            "col_window" => "Finestra",
-            "pickup_time_label" => "Ora ritiro (globale, HH:MM)",
-            "tz_label" => "Timezone",
-            "empty_hint" => "Una riga per ogni ritiro: spunta le settimane del mese (1-5) e scrivi il tipo. Il + duplica il giorno, il - elimina la riga. Campo tipo vuoto = riga ignorata.",
-            "save" => "Salva",
-            "err_tz" => "timezone non valida",
-            "err_time" => "pickup_time non valido (atteso HH:MM)",
-            "err_io" => "errore salvataggio database",
-            "err_overlap" => "Sovrapposizione: {} della {}ª settimana già assegnato.",
-            _ => "",
-        },
-        Lang::En => match key {
-            "title_home" => "Waste collection",
-            "title_admin" => "Backoffice",
-            "nav_home" => "Home",
-            "nav_admin" => "Backoffice",
-            "now_open" => "You can throw now: {}",
-            "window_until" => "Window open until {}.",
-            "pause" => "Pause: no pickup running. Next pickup from {}.",
-            "today_pickup" => "Today ({}) pickup: {} at {}",
-            "today_none" => "Today ({}) no pickup.",
-            "week" => "Week {}",
-            "col_day" => "Day",
-            "col_type" => "Type",
-            "col_window" => "Window",
-            "pickup_time_label" => "Pickup time (global, HH:MM)",
-            "tz_label" => "Timezone",
-            "empty_hint" => "One row per pickup: tick the weeks of the month (1-5) and write the type. The + duplicates the day, the - removes the row. Empty type field = row ignored.",
-            "save" => "Save",
-            "err_tz" => "invalid timezone",
-            "err_time" => "invalid pickup_time (expected HH:MM)",
-            "err_io" => "database save error",
-            "err_overlap" => "Overlap: {} of week {} already assigned.",
-            _ => "",
-        },
+fn week_of_month(date: chrono::NaiveDate) -> u32 {
+    (date.day() - 1) / 7 + 1
+}
+
+#[derive(Clone, Copy)]
+pub enum T<'a> {
+    TitleHome,
+    TitleAdmin,
+    NavHome,
+    NavAdmin,
+    NowOpen(&'a str),
+    WindowUntil(DateTime<Tz>),
+    Pause(DateTime<Tz>),
+    TodayPickup(Tz, &'a str, NaiveTime),
+    TodayNone(Tz),
+    Week(NaiveDate),
+    ColDay,
+    ColType,
+    ColWindow,
+    PickupTimeLabel,
+    TzLabel,
+    EmptyHint,
+    Save,
+    ErrTz,
+    ErrTime,
+    ErrIo,
+    ErrOverlap(&'a str, u32),
+}
+
+enum LocalizedT<'a> {
+    It(T<'a>),
+    En(T<'a>),
+}
+
+impl<'a> From<(Lang, T<'a>)> for LocalizedT<'a> {
+    fn from((l, t): (Lang, T<'a>)) -> Self {
+        match l {
+            Lang::It => LocalizedT::It(t),
+            Lang::En => LocalizedT::En(t),
+        }
+    }
+}
+
+impl LocalizedDisplay for DateTime<Tz> {
+    fn fmt(&self, lng: Lang, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match lng {
+            Lang::It => {
+                let day = days(Lang::It)[day_index(self.weekday())];
+                f.write_str(day)?;
+                f.write_char(' ')?;
+                fmt::Display::fmt(&self.format("%d/%m"), f)?;
+                f.write_str(" alle ")?;
+                fmt::Display::fmt(&self.format("%H:%M"), f)
+            }
+            Lang::En => {
+                let day = days(Lang::En)[day_index(self.weekday())];
+                f.write_str(day)?;
+                f.write_char(' ')?;
+                fmt::Display::fmt(&self.format("%d/%m"), f)?;
+                f.write_str(" at ")?;
+                fmt::Display::fmt(&self.format("%H:%M"), f)
+            }
+        }
+    }
+}
+
+impl<'a> fmt::Display for LocalizedT<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LocalizedT::It(t) => match t {
+                T::TitleHome => f.write_str("Differenziata"),
+                T::TitleAdmin => f.write_str("Backoffice"),
+                T::NavHome => f.write_str("Home"),
+                T::NavAdmin => f.write_str("Backoffice"),
+                T::NowOpen(what) => {
+                    f.write_str("Adesso puoi buttare: ")?;
+                    f.write_str(what)
+                }
+                T::WindowUntil(dt) => {
+                    f.write_str("Finestra aperta fino a ")?;
+                    LocalizedDisplay::fmt(dt, Lang::It, f)?;
+                    f.write_char('.')
+                }
+                T::Pause(dt) => {
+                    f.write_str("Pausa: nessun ritiro in corso. Prossima raccolta da ")?;
+                    LocalizedDisplay::fmt(dt, Lang::It, f)?;
+                    f.write_char('.')
+                }
+                T::TodayPickup(tz, what, hour) => {
+                    f.write_str("Oggi (")?;
+                    fmt::Display::fmt(&Utc::now().with_timezone(tz).format("%d/%m"), f)?;
+                    f.write_str(") ritirano: ")?;
+                    f.write_str(what)?;
+                    f.write_str(" alle ")?;
+                    fmt::Display::fmt(&hour.format("%H:%M"), f)
+                }
+                T::TodayNone(tz) => {
+                    f.write_str("Oggi (")?;
+                    fmt::Display::fmt(&Utc::now().with_timezone(tz).format("%d/%m"), f)?;
+                    f.write_str(") nessun ritiro.")
+                }
+                T::Week(date) => {
+                    fmt::Display::fmt(&week_of_month(*date), f)?;
+                    f.write_str("ª settimana")
+                }
+                T::ColDay => f.write_str("Giorno"),
+                T::ColType => f.write_str("Tipo"),
+                T::ColWindow => f.write_str("Finestra"),
+                T::PickupTimeLabel => f.write_str("Ora ritiro (globale, HH:MM)"),
+                T::TzLabel => f.write_str("Timezone"),
+                T::EmptyHint => f.write_str(concat!(
+                    "Una riga per ogni ritiro: spunta le settimane del mese (1-5) e ",
+                    "scrivi il tipo. Il + duplica il giorno, il - elimina la riga. ",
+                    "Campo tipo vuoto = riga ignorata.",
+                )),
+                T::Save => f.write_str("Salva"),
+                T::ErrTz => f.write_str("timezone non valida"),
+                T::ErrTime => f.write_str("orario ritiro non valido (atteso HH:MM)"),
+                T::ErrIo => f.write_str("errore salvataggio database"),
+                T::ErrOverlap(day, which) => {
+                    f.write_str("Sovrapposizione: ")?;
+                    f.write_str(day)?;
+                    f.write_str(" della ")?;
+                    fmt::Display::fmt(&which, f)?;
+                    f.write_str("ª settimana già assegnato.")
+                }
+            },
+            LocalizedT::En(t) => match t {
+                T::TitleHome => f.write_str("Waste collection"),
+                T::TitleAdmin => f.write_str("Backoffice"),
+                T::NavHome => f.write_str("Home"),
+                T::NavAdmin => f.write_str("Backoffice"),
+                T::NowOpen(what) => {
+                    f.write_str("You can throw now: ")?;
+                    f.write_str(what)
+                }
+                T::WindowUntil(dt) => {
+                    f.write_str("Window open until ")?;
+                    LocalizedDisplay::fmt(dt, Lang::En, f)?;
+                    f.write_char('.')
+                }
+                T::Pause(dt) => {
+                    f.write_str("Pause: no pickup running. Next pickup from ")?;
+                    LocalizedDisplay::fmt(dt, Lang::En, f)?;
+                    f.write_char('.')
+                }
+                T::TodayPickup(tz, what, hour) => {
+                    f.write_str("Today (")?;
+                    fmt::Display::fmt(&Utc::now().with_timezone(tz).format("%m/%d"), f)?;
+                    f.write_str(") pickup: ")?;
+                    f.write_str(what)?;
+                    f.write_str(" at ")?;
+                    fmt::Display::fmt(&hour.format("%H:%M"), f)
+                }
+                T::TodayNone(tz) => {
+                    f.write_str("Today (")?;
+                    fmt::Display::fmt(&Utc::now().with_timezone(tz).format("%m/%d"), f)?;
+                    f.write_str(") no pickup.")
+                }
+                T::Week(date) => {
+                    f.write_str("Week ")?;
+                    fmt::Display::fmt(&week_of_month(*date), f)
+                }
+                T::ColDay => f.write_str("Day"),
+                T::ColType => f.write_str("Type"),
+                T::ColWindow => f.write_str("Window"),
+                T::PickupTimeLabel => f.write_str("Pickup time (global, HH:MM)"),
+                T::TzLabel => f.write_str("Timezone"),
+                T::EmptyHint => f.write_str(concat!(
+                    "One row per pickup: tick the weeks of the month (1-5) and write ",
+                    "the type. The + duplicates the day, the - removes the row. Empty ",
+                    "type field = row ignored.",
+                )),
+                T::Save => f.write_str("Save"),
+                T::ErrTz => f.write_str("invalid timezone"),
+                T::ErrTime => f.write_str("invalid pickup_time (expected HH:MM)"),
+                T::ErrIo => f.write_str("database save error"),
+                T::ErrOverlap(day, which) => {
+                    f.write_str("Overlap: ")?;
+                    f.write_str(day)?;
+                    f.write_str(" of week ")?;
+                    fmt::Display::fmt(&which, f)?;
+                    f.write_str(" already assigned.")
+                }
+            },
+        }
     }
 }
 
@@ -104,17 +258,117 @@ pub fn days(lng: Lang) -> [&'static str; 7] {
     }
 }
 
+fn day_index(wd: Weekday) -> usize {
+    wd.num_days_from_monday() as usize
+}
+
 pub fn days_full(lng: Lang) -> [&'static str; 7] {
     match lng {
-        Lang::It => ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"],
-        Lang::En => ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+        Lang::It => [
+            "Lunedì",
+            "Martedì",
+            "Mercoledì",
+            "Giovedì",
+            "Venerdì",
+            "Sabato",
+            "Domenica",
+        ],
+        Lang::En => [
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday",
+        ],
     }
 }
 
-pub fn fill(tpl: &str, parts: &[&str]) -> String {
-    let mut out = tpl.to_string();
-    for p in parts {
-        out = out.replacen("{}", p, 1);
+pub struct HtmlEscape<T>(pub T);
+
+pub struct EscapeWriter<'a, 'b> {
+    f: &'a mut fmt::Formatter<'b>,
+}
+
+impl<'a, 'b> Write for EscapeWriter<'a, 'b> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let mut last = 0;
+
+        for (i, b) in s.bytes().enumerate() {
+            let escaped = match b {
+                b'<' => "&lt;",
+                b'>' => "&gt;",
+                b'&' => "&amp;",
+                b'"' => "&quot;",
+                b'\'' => "&#39;",
+                _ => continue,
+            };
+
+            if last < i {
+                self.f.write_str(&s[last..i])?;
+            }
+            self.f.write_str(escaped)?;
+            last = i + 1;
+        }
+
+        if last < s.len() {
+            self.f.write_str(&s[last..])?;
+        }
+        Ok(())
     }
-    out
+}
+
+impl<T: fmt::Display> fmt::Display for HtmlEscape<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut writer = EscapeWriter { f };
+        write!(writer, "{}", self.0)
+    }
+}
+
+pub fn esc<T: fmt::Display>(x: T) -> HtmlEscape<T> {
+    HtmlEscape(x)
+}
+
+pub trait LocalizedDisplay {
+    fn fmt(&self, lng: Lang, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+
+impl<'a> LocalizedDisplay for T<'a> {
+    #[inline(always)]
+    fn fmt(&self, lng: Lang, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&LocalizedT::from((lng, *self)), f)
+    }
+}
+
+pub struct Localized<T: LocalizedDisplay>(Lang, T);
+
+impl<T: LocalizedDisplay> fmt::Display for Localized<T> {
+    #[inline(always)]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        LocalizedDisplay::fmt(&self.1, self.0, f)
+    }
+}
+
+impl<T: LocalizedDisplay> From<(Lang, T)> for Localized<T> {
+    #[inline(always)]
+    fn from((lng, t): (Lang, T)) -> Self {
+        Localized(lng, t)
+    }
+}
+
+pub struct LocalizedRef<'a, T: LocalizedDisplay + 'a>(Lang, &'a T);
+
+impl<'a, T: LocalizedDisplay + 'a> fmt::Display for LocalizedRef<'a, T> {
+    #[inline(always)]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        LocalizedDisplay::fmt(self.1, self.0, f)
+    }
+}
+
+impl<'a, T: LocalizedDisplay + 'a> From<(Lang, &'a T)> for LocalizedRef<'a, T> {
+    #[inline(always)]
+    fn from((lng, t): (Lang, &'a T)) -> Self {
+        LocalizedRef(lng, t)
+    }
 }
