@@ -53,14 +53,12 @@ fn lang_of(req: &HttpRequest) -> Lang {
     let cookie = req
         .headers()
         .get(COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .and_then(|v| v.to_str().ok());
     let al = req
         .headers()
         .get(actix_web::http::header::ACCEPT_LANGUAGE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-    Lang::from_req(cookie.as_deref(), al.as_deref())
+        .and_then(|v| v.to_str().ok());
+    Lang::from_req(cookie, al)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -185,14 +183,14 @@ impl State {
         Ok(())
     }
 
-    fn type_for(&self, date: chrono::NaiveDate) -> String {
+    fn type_for(&self, date: chrono::NaiveDate) -> &str {
         let day = DAY_KEYS[day_index(date.weekday())];
         let week = week_of_month(date);
         self.schedule
             .iter()
             .find(|e| e.day == day && e.weeks.contains(&week))
-            .map(|e| e.kind.clone())
-            .unwrap_or_default()
+            .map(|e| e.kind.as_str())
+            .unwrap_or("")
     }
 
     fn boundary(&self, date: chrono::NaiveDate) -> DateTime<Tz> {
@@ -202,7 +200,7 @@ impl State {
             .expect("boundary locale non risolvibile")
     }
 
-    fn next_boundary(&self, now: DateTime<Tz>) -> (chrono::NaiveDate, Weekday, String) {
+    fn next_boundary(&self, now: DateTime<Tz>) -> (chrono::NaiveDate, Weekday, &str) {
         for i in 0..=7 {
             let date = now.date_naive() + Duration::days(i);
             let b = self.boundary(date);
@@ -312,7 +310,7 @@ impl<'a> LocalizedDisplay for HomeHtml<'a> {
             fmt::Display::fmt(&esc(Localized::from((lng, T::Pause(open_dt)))), f)?;
         } else {
             f.write_str("<strong>")?;
-            fmt::Display::fmt(&esc(Localized::from((lng, T::NowOpen(&open_type)))), f)?;
+            fmt::Display::fmt(&esc(Localized::from((lng, T::NowOpen(open_type)))), f)?;
             f.write_str("</strong></p><p>")?;
             fmt::Display::fmt(&esc(Localized::from((lng, T::WindowUntil(open_dt)))), f)?;
         }
@@ -328,7 +326,7 @@ impl<'a> LocalizedDisplay for HomeHtml<'a> {
             fmt::Display::fmt(
                 &esc(Localized::from((
                     lng,
-                    T::TodayPickup(self.0.timezone, &today_type, pickup),
+                    T::TodayPickup(self.0.timezone, today_type, pickup),
                 ))),
                 f,
             )?;
@@ -355,7 +353,7 @@ impl<'a> LocalizedDisplay for HomeHtml<'a> {
             if ty.is_empty() {
                 f.write_char('—')?;
             } else {
-                fmt::Display::fmt(&esc(&ty), f)?;
+                fmt::Display::fmt(&esc(ty), f)?;
             }
             f.write_str("</td><td>")?;
             f.write_str(dnames[(wi + 6) % 7])?;
@@ -421,7 +419,7 @@ struct AdminForm {
 #[derive(Default)]
 struct FormErrors {
     fields: HashMap<String, String>,
-    bad_weeks: HashMap<String, Vec<u32>>,
+    bad_weeks: HashMap<(&'static str, usize), Vec<u32>>,
 }
 
 fn row_html2<'a>(
@@ -439,11 +437,10 @@ fn row_html2<'a>(
 
     impl<'a> fmt::Display for RowHtml<'a> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            let row_key = format!("{}:{}", self.day, self.idx);
             let bad = self
                 .errs
                 .bad_weeks
-                .get(&row_key)
+                .get(&(self.day, self.idx))
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
             f.write_str("<p><span class=\"weeks\">")?;
@@ -496,10 +493,13 @@ fn row_html2<'a>(
             f.write_char(':')?;
             fmt::Display::fmt(&self.idx, f)?;
             f.write_str("\">-</button></span></p>")?;
-            if let Some(e) = self.errs.fields.get(&row_key) {
-                f.write_str("<span class=\"err\">")?;
-                fmt::Display::fmt(&esc(e), f)?;
-                f.write_str("</span>")?;
+            if !self.errs.fields.is_empty() {
+                let row_key = format!("{}:{}", self.day, self.idx);
+                if let Some(e) = self.errs.fields.get(&row_key) {
+                    f.write_str("<span class=\"err\">")?;
+                    fmt::Display::fmt(&esc(e), f)?;
+                    f.write_str("</span>")?;
+                }
             }
             Ok(())
         }
@@ -616,11 +616,11 @@ fn validate_and_save(db_path: &PathBuf, f: &AdminForm, lng: Lang) -> Result<(), 
                     for w in &weeks {
                         if !seen.insert((e.day.clone(), *w)) {
                             let key = format!("{day}:{idx}");
-                            errs.fields.entry(key.clone()).or_insert_with(|| {
+                            errs.fields.entry(key).or_insert_with(|| {
                                 Localized::from((lng, T::ErrOverlap(days_full(lng)[di], *w)))
                                     .to_string()
                             });
-                            errs.bad_weeks.entry(key).or_default().push(*w);
+                            errs.bad_weeks.entry((day, idx)).or_default().push(*w);
                         }
                     }
                     schedule.push(Entry {
@@ -843,7 +843,7 @@ fn cli_cmd(db_path: PathBuf) -> Result<(), String> {
     } else {
         println!(
             "{} ({})",
-            Localized::from((lng, T::NowOpen(&open_type))),
+            Localized::from((lng, T::NowOpen(open_type))),
             Localized::from((lng, T::WindowUntil(open_dt)))
         );
     }
@@ -1271,7 +1271,7 @@ mod tests {
         };
         let errs = validate_and_save(&PathBuf::from("/nonexistent"), &f, Lang::It).unwrap_err();
         assert!(errs.fields.contains_key("monday:1"));
-        assert_eq!(errs.bad_weeks.get("monday:1").unwrap(), &[2]);
+        assert_eq!(errs.bad_weeks.get(&("monday", 1)).unwrap(), &[2]);
     }
 
     #[test]
