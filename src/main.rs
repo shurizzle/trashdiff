@@ -49,7 +49,7 @@ fn sort_key(e: &Entry) -> (bool, u32) {
     )
 }
 
-fn lang_of(req: &HttpRequest) -> Lang {
+fn lang_of(req: &HttpRequest, st: &State) -> Lang {
     let cookie = req
         .headers()
         .get(COOKIE)
@@ -58,7 +58,7 @@ fn lang_of(req: &HttpRequest) -> Lang {
         .headers()
         .get(actix_web::http::header::ACCEPT_LANGUAGE)
         .and_then(|v| v.to_str().ok());
-    Lang::from_req(cookie, al)
+    Lang::from_req(cookie, al, st.default_lang.unwrap_or(Lang::En))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -67,6 +67,8 @@ struct Db {
     pickup_time: String,
     #[serde(default)]
     schedule: Vec<Entry>,
+    #[serde(default)]
+    default_lang: Option<Lang>,
 }
 
 #[derive(Deserialize)]
@@ -90,6 +92,7 @@ fn default_db() -> Db {
         timezone: "Europe/Rome".to_string(),
         pickup_time: "05:00".to_string(),
         schedule: Vec::new(),
+        default_lang: None,
     }
 }
 
@@ -107,6 +110,7 @@ fn migrate_old(old: DbOld) -> Db {
         timezone: old.timezone,
         pickup_time: old.pickup_time,
         schedule,
+        default_lang: None,
     }
 }
 
@@ -119,6 +123,7 @@ struct State {
     timezone: Tz,
     pickup_time: NaiveTime,
     schedule: Vec<Entry>,
+    default_lang: Option<Lang>,
 }
 
 impl State {
@@ -162,6 +167,7 @@ impl State {
             timezone,
             pickup_time,
             schedule: db.schedule,
+            default_lang: db.default_lang,
         })
     }
 
@@ -370,11 +376,11 @@ impl<'a> LocalizedDisplay for HomeHtml<'a> {
 }
 
 async fn home(req: HttpRequest, data: web::Data<AppState>) -> HttpResponse {
-    let lng = lang_of(&req);
     let st = match load_or_500(&data) {
         Ok(st) => st,
         Err(resp) => return resp,
     };
+    let lng = lang_of(&req, &st);
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
         .body(Localized::from((lng, Page(T::TitleHome, HomeHtml(&st)))).to_string())
@@ -386,15 +392,16 @@ fn admin_form_from_state(st: &State) -> AdminForm {
         pickup_time: st.pickup_time.format("%H:%M").to_string(),
         entries: st.schedule.clone(),
         action: String::new(),
+        default_lang: st.default_lang.map(|l| l.to_string()).unwrap_or_default(),
     }
 }
 
 async fn admin_get(req: HttpRequest, data: web::Data<AppState>) -> HttpResponse {
-    let lng = lang_of(&req);
     let st = match load_or_500(&data) {
         Ok(st) => st,
         Err(resp) => return resp,
     };
+    let lng = lang_of(&req, &st);
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
         .body(
@@ -414,6 +421,7 @@ struct AdminForm {
     pickup_time: String,
     entries: Vec<Entry>,
     action: String,
+    default_lang: String,
 }
 
 #[derive(Default)]
@@ -552,6 +560,31 @@ impl LocalizedDisplay for AdminFormHtml {
             f.write_str("</span>")?;
         }
         f.write_str("</p>")?;
+        f.write_str("<p><label>")?;
+        fmt::Display::fmt(&esc(Localized::from((lng, T::LangLabel))), f)?;
+        f.write_str("<br><select name=\"default_lang\">")?;
+        f.write_str("<option value=\"\"")?;
+        if self.0.default_lang.is_empty() {
+            f.write_str(" selected")?;
+        }
+        f.write_str(">Auto (en)</option>")?;
+        f.write_str("<option value=\"it\"")?;
+        if self.0.default_lang == "it" {
+            f.write_str(" selected")?;
+        }
+        f.write_str(">Italiano</option>")?;
+        f.write_str("<option value=\"en\"")?;
+        if self.0.default_lang == "en" {
+            f.write_str(" selected")?;
+        }
+        f.write_str(">English</option>")?;
+        f.write_str("</select></label>")?;
+        if let Some(err) = self.1.fields.get("default_lang") {
+            f.write_str("<span class=\"err\">")?;
+            fmt::Display::fmt(&esc(err), f)?;
+            f.write_str("</span>")?;
+        }
+        f.write_str("</p>")?;
 
         let full = days_full(lng);
         for (di, day) in DAY_KEYS.iter().enumerate() {
@@ -595,6 +628,18 @@ fn validate_and_save(db_path: &PathBuf, f: &AdminForm, lng: Lang) -> Result<(), 
             format!("{}: {e}", Localized::from((lng, T::ErrTime))),
         );
     }
+    let default_lang = match f.default_lang.as_str() {
+        "" => None,
+        "it" => Some(Lang::It),
+        "en" => Some(Lang::En),
+        other => {
+            errs.fields.insert(
+                "default_lang".to_string(),
+                format!("{}: {other}", Localized::from((lng, T::ErrLang))),
+            );
+            None
+        }
+    };
     let mut schedule: Vec<Entry> = Vec::new();
     let mut seen: HashSet<(String, u32)> = HashSet::new();
     for day in DAY_KEYS {
@@ -638,6 +683,7 @@ fn validate_and_save(db_path: &PathBuf, f: &AdminForm, lng: Lang) -> Result<(), 
         timezone: f.timezone.to_string(),
         pickup_time: f.pickup_time.to_string(),
         schedule,
+        default_lang,
     };
     if let Err(e) = State::save_file(db_path, &db) {
         let mut errs = FormErrors::default();
@@ -690,7 +736,11 @@ fn process_admin(
 }
 
 async fn admin_post(req: HttpRequest, data: web::Data<AppState>, body: web::Bytes) -> HttpResponse {
-    let lng = lang_of(&req);
+    let st = match load_or_500(&data) {
+        Ok(st) => st,
+        Err(resp) => return resp,
+    };
+    let lng = lang_of(&req, &st);
     let f = form_from_body(&body);
     match process_admin(f, &data.0, lng) {
         Ok(Some(form)) => HttpResponse::Ok()
@@ -865,12 +915,12 @@ async fn serve(bind: String, db_path: PathBuf) -> std::io::Result<()> {
     .await
 }
 
-fn lang_from_headers(h: &http::HeaderMap) -> Lang {
+fn lang_from_headers(h: &http::HeaderMap, st: &State) -> Lang {
     let cookie = h.get(http::header::COOKIE).and_then(|v| v.to_str().ok());
     let al = h
         .get(http::header::ACCEPT_LANGUAGE)
         .and_then(|v| v.to_str().ok());
-    Lang::from_req(cookie, al)
+    Lang::from_req(cookie, al, st.default_lang.unwrap_or(Lang::En))
 }
 
 fn form_from_body(body: &[u8]) -> AdminForm {
@@ -920,6 +970,7 @@ fn form_from_body(body: &[u8]) -> AdminForm {
         pickup_time: get("pickup_time"),
         entries,
         action,
+        default_lang: get("default_lang"),
     }
 }
 
@@ -1044,7 +1095,7 @@ async fn cgi_run(db: PathBuf) -> std::io::Result<()> {
                 .await
                 .map_err(std::io::Error::other)?
                 .to_bytes();
-            let lng = lang_from_headers(&headers);
+            let lng = lang_from_headers(&headers, &st);
             let resp: Result<http::Response<BoxBody<Bytes, std::io::Error>>, std::io::Error> =
                 Ok(route_cgi(&st, lng, &method, &path, &headers, body));
             resp
@@ -1111,8 +1162,8 @@ async fn fcgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
                             .and_then(|v| v.parse::<usize>().ok())
                             .unwrap_or(0);
                         let body = read_body_capped(request.into_body(), content_length).await?;
-                        let lng = lang_from_headers(&headers);
                         let st = State::load(db).map_err(std::io::Error::other)?;
+                        let lng = lang_from_headers(&headers, &st);
                         let resp: Result<
                             http::Response<BoxBody<Bytes, std::io::Error>>,
                             std::io::Error,
@@ -1144,8 +1195,8 @@ async fn scgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
                         .and_then(|v| v.parse::<usize>().ok())
                         .unwrap_or(0);
                     let body = read_body_capped(request.into_body(), content_length).await?;
-                    let lng = lang_from_headers(&headers);
                     let st = State::load(db).map_err(std::io::Error::other)?;
+                    let lng = lang_from_headers(&headers, &st);
                     let resp: Result<
                         http::Response<BoxBody<Bytes, std::io::Error>>,
                         std::io::Error,
@@ -1181,6 +1232,7 @@ mod tests {
             timezone: "Europe/Rome".parse().unwrap(),
             pickup_time: NaiveTime::parse_from_str("17:00", "%H:%M").unwrap(),
             schedule,
+            default_lang: None,
         }
     }
 
@@ -1267,6 +1319,7 @@ mod tests {
                 },
             ],
             action: "save".to_string(),
+            default_lang: String::new(),
         };
         let errs = validate_and_save(&PathBuf::from("/nonexistent"), &f, Lang::It).unwrap_err();
         assert!(errs.fields.contains_key("monday:1"));
@@ -1318,7 +1371,7 @@ mod tests {
                         .and_then(|v| v.parse::<usize>().ok())
                         .unwrap_or(0);
                     let body = read_body_capped(request.into_body(), content_length).await?;
-                    let lng = lang_from_headers(&headers);
+                    let lng = lang_from_headers(&headers, &st);
                     let resp: Result<
                         http::Response<BoxBody<Bytes, std::io::Error>>,
                         std::io::Error,
@@ -1399,7 +1452,7 @@ mod tests {
                         .and_then(|v| v.parse::<usize>().ok())
                         .unwrap_or(0);
                     let body = read_body_capped(request.into_body(), content_length).await?;
-                    let lng = lang_from_headers(&headers);
+                    let lng = lang_from_headers(&headers, &st);
                     let resp: Result<
                         http::Response<BoxBody<Bytes, std::io::Error>>,
                         std::io::Error,
@@ -1504,7 +1557,7 @@ mod tests {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(0);
         let body = read_body_capped(request.into_body(), content_length).await?;
-        let lng = lang_from_headers(&headers);
+        let lng = lang_from_headers(&headers, st);
         Ok(route_cgi(st, lng, &method, &path, &headers, body))
     }
 

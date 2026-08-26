@@ -2,15 +2,17 @@ use std::fmt::{self, Write};
 
 use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc, Weekday};
 use chrono_tz::Tz;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Lang {
     It,
     En,
 }
 
 impl Lang {
-    pub fn from_req(cookie: Option<&str>, accept_language: Option<&str>) -> Lang {
+    pub fn from_req(cookie: Option<&str>, accept_language: Option<&str>, default: Lang) -> Lang {
         if let Some(c) = cookie.and_then(parse_cookie_lang) {
             return c;
         }
@@ -20,7 +22,7 @@ impl Lang {
         {
             Lang::It
         } else {
-            Lang::En
+            default
         }
     }
 
@@ -83,11 +85,13 @@ pub enum T<'a> {
     ColWindow,
     PickupTimeLabel,
     TzLabel,
+    LangLabel,
     EmptyHint,
     Save,
     ErrTz,
     ErrTime,
     ErrIo,
+    ErrLang,
     ErrOverlap(&'a str, u32),
 }
 
@@ -172,6 +176,7 @@ impl<'a> fmt::Display for LocalizedT<'a> {
                 T::ColWindow => f.write_str("Finestra"),
                 T::PickupTimeLabel => f.write_str("Ora ritiro (globale, HH:MM)"),
                 T::TzLabel => f.write_str("Timezone"),
+                T::LangLabel => f.write_str("Lingua di default"),
                 T::EmptyHint => f.write_str(concat!(
                     "Una riga per ogni ritiro: spunta le settimane del mese (1-5) e ",
                     "scrivi il tipo. Il + duplica il giorno, il - elimina la riga. ",
@@ -181,6 +186,7 @@ impl<'a> fmt::Display for LocalizedT<'a> {
                 T::ErrTz => f.write_str("timezone non valida"),
                 T::ErrTime => f.write_str("orario ritiro non valido (atteso HH:MM)"),
                 T::ErrIo => f.write_str("errore salvataggio database"),
+                T::ErrLang => f.write_str("lingua di default non valida"),
                 T::ErrOverlap(day, which) => {
                     f.write_str("Sovrapposizione: ")?;
                     f.write_str(day)?;
@@ -230,6 +236,7 @@ impl<'a> fmt::Display for LocalizedT<'a> {
                 T::ColWindow => f.write_str("Window"),
                 T::PickupTimeLabel => f.write_str("Pickup time (global, HH:MM)"),
                 T::TzLabel => f.write_str("Timezone"),
+                T::LangLabel => f.write_str("Default language"),
                 T::EmptyHint => f.write_str(concat!(
                     "One row per pickup: tick the weeks of the month (1-5) and write ",
                     "the type. The + duplicates the day, the - removes the row. Empty ",
@@ -239,6 +246,7 @@ impl<'a> fmt::Display for LocalizedT<'a> {
                 T::ErrTz => f.write_str("invalid timezone"),
                 T::ErrTime => f.write_str("invalid pickup_time (expected HH:MM)"),
                 T::ErrIo => f.write_str("database save error"),
+                T::ErrLang => f.write_str("invalid default language"),
                 T::ErrOverlap(day, which) => {
                     f.write_str("Overlap: ")?;
                     f.write_str(day)?;
@@ -370,5 +378,46 @@ impl<'a, T: LocalizedDisplay + 'a> From<(Lang, &'a T)> for LocalizedRef<'a, T> {
     #[inline(always)]
     fn from((lng, t): (Lang, &'a T)) -> Self {
         LocalizedRef(lng, t)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lang_priority_cookie_over_accept_over_config_over_en() {
+        assert_eq!(
+            Lang::from_req(Some("lang=it"), Some("en-US"), Lang::En),
+            Lang::It
+        );
+        assert_eq!(
+            Lang::from_req(None, Some("it-IT"), Lang::En),
+            Lang::It
+        );
+        assert_eq!(
+            Lang::from_req(None, Some("en-US"), Lang::It),
+            Lang::It
+        );
+        assert_eq!(
+            Lang::from_req(None, Some("en-US"), Lang::En),
+            Lang::En
+        );
+    }
+
+    #[test]
+    fn lang_roundtrips_toml() {
+        #[derive(Serialize, Deserialize)]
+        struct T {
+            lang: Lang,
+        }
+        let it: T = toml::from_str("lang = \"it\"").unwrap();
+        let en: T = toml::from_str("lang = \"en\"").unwrap();
+        assert_eq!(it.lang, Lang::It);
+        assert_eq!(en.lang, Lang::En);
+        assert_eq!(
+            toml::to_string(&T { lang: Lang::It }).unwrap().trim(),
+            "lang = \"it\""
+        );
     }
 }
