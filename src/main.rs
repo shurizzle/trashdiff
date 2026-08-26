@@ -355,7 +355,7 @@ impl<Title: LocalizedDisplay, Body: LocalizedDisplay> LocalizedDisplay for Page<
         f.write_str("</a> <a href=\"/lang/")?;
         fmt::Display::fmt(&other_lang, f)?;
         f.write_str("\">")?;
-        fmt::Debug::fmt(&other_lang, f)?;
+        fmt::Debug::fmt(&lng, f)?;
         f.write_str("</a></span></nav>")?;
         fmt::Display::fmt(&LocalizedRef::from((lng, &self.1)), f)?;
         f.write_str("</body></html>")
