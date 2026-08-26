@@ -61,6 +61,61 @@ fn lang_of(req: &HttpRequest, st: &State) -> Lang {
     Lang::from_req(cookie, al, st.default_lang.unwrap_or(Lang::En))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Theme {
+    Auto,
+    Light,
+    Dark,
+}
+
+impl Theme {
+    fn from_req(cookie: Option<&str>) -> Theme {
+        cookie.and_then(parse_cookie_theme).unwrap_or(Theme::Auto)
+    }
+
+    fn next(self) -> Theme {
+        match self {
+            Theme::Auto => Theme::Light,
+            Theme::Light => Theme::Dark,
+            Theme::Dark => Theme::Auto,
+        }
+    }
+
+    fn scheme(self) -> &'static str {
+        match self {
+            Theme::Auto => "light dark",
+            Theme::Light => "light",
+            Theme::Dark => "dark",
+        }
+    }
+}
+
+impl fmt::Display for Theme {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Theme::Auto => "auto",
+            Theme::Light => "light",
+            Theme::Dark => "dark",
+        })
+    }
+}
+
+fn parse_cookie_theme(cookie: &str) -> Option<Theme> {
+    cookie.split(';').find_map(|part| {
+        let (k, v) = part.trim().split_once('=')?;
+        (k == "theme").then_some(match v {
+            "light" => Theme::Light,
+            "dark" => Theme::Dark,
+            _ => Theme::Auto,
+        })
+    })
+}
+
+fn theme_of(req: &HttpRequest) -> Theme {
+    let cookie = req.headers().get(COOKIE).and_then(|v| v.to_str().ok());
+    Theme::from_req(cookie)
+}
+
 #[derive(Serialize, Deserialize)]
 struct Db {
     timezone: String,
@@ -229,15 +284,18 @@ fn load_or_500(data: &AppState) -> Result<State, HttpResponse> {
     })
 }
 
-struct Page<Title: LocalizedDisplay, Body: LocalizedDisplay>(Title, Body);
+struct Page<Title: LocalizedDisplay, Body: LocalizedDisplay>(Title, Body, Theme);
 
 impl<Title: LocalizedDisplay, Body: LocalizedDisplay> LocalizedDisplay for Page<Title, Body> {
     fn fmt(&self, lng: Lang, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let other_lang = if lng == Lang::It { Lang::En } else { Lang::It };
+        let next_theme = self.2.next();
         f.write_str(concat!("<!doctype html>", "<html lang=\""))?;
         fmt::Display::fmt(&lng, f)?;
+        f.write_str("\" style=\"color-scheme:")?;
+        f.write_str(self.2.scheme())?;
         f.write_str(concat!(
-            "\" style=\"color-scheme:light dark\">",
+            "\">",
             "<head><meta charset=\"utf-8\">",
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
             "<title>"
@@ -266,25 +324,35 @@ impl<Title: LocalizedDisplay, Body: LocalizedDisplay> LocalizedDisplay for Page<
             "@supports selector(:checked){.weeks input[type=checkbox]{position:absolute;opacity:0;pointer-events:none}.weeks label{cursor:pointer}}",
             "form p{margin:.6rem 0}",
             "button{padding:.5rem 1.2rem;cursor:pointer}",
-            "@media (prefers-color-scheme:dark) {",
+        ))?;
+        let dark = concat!(
             "body{color:#ddd;background:#1e1e1e}",
             "th,td{border-color:#444}",
             "th{background:#2a2a2a}",
             ".now{background:#1e3a2b}",
             ".err{background:#4a1f1f;color:#ffb4ab}",
             "a{color:#8ab4f8}",
-            "}",
-            "</style></head><body>",
-        ))?;
+        );
+        match self.2 {
+            Theme::Auto => {
+                f.write_str("@media (prefers-color-scheme:dark) {")?;
+                f.write_str(dark)?;
+                f.write_str("}")?;
+            }
+            Theme::Dark => f.write_str(dark)?,
+            Theme::Light => {}
+        }
+        f.write_str("</style></head><body>")?;
 
         f.write_str("<nav><a href=\"/\">")?;
         fmt::Display::fmt(&Localized::from((lng, T::NavHome)), f)?;
         f.write_str("</a><a href=\"/admin\">")?;
         fmt::Display::fmt(&Localized::from((lng, T::NavAdmin)), f)?;
-        f.write_str(concat!(
-            "</a>",
-            "<span style=\"float:right\"><a href=\"/lang/"
-        ))?;
+        f.write_str("</a><span style=\"float:right\"><a href=\"/theme/")?;
+        fmt::Display::fmt(&next_theme, f)?;
+        f.write_str("\">")?;
+        fmt::Display::fmt(&self.2, f)?;
+        f.write_str("</a> <a href=\"/lang/")?;
         fmt::Display::fmt(&other_lang, f)?;
         f.write_str("\">")?;
         fmt::Debug::fmt(&other_lang, f)?;
@@ -383,9 +451,10 @@ async fn home(req: HttpRequest, data: web::Data<AppState>) -> HttpResponse {
         Err(resp) => return resp,
     };
     let lng = lang_of(&req, &st);
+    let theme = theme_of(&req);
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
-        .body(Localized::from((lng, Page(T::TitleHome, HomeHtml(&st)))).to_string())
+        .body(Localized::from((lng, Page(T::TitleHome, HomeHtml(&st), theme))).to_string())
 }
 
 fn admin_form_from_state(st: &State) -> AdminForm {
@@ -404,6 +473,7 @@ async fn admin_get(req: HttpRequest, data: web::Data<AppState>) -> HttpResponse 
         Err(resp) => return resp,
     };
     let lng = lang_of(&req, &st);
+    let theme = theme_of(&req);
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
         .body(
@@ -412,6 +482,7 @@ async fn admin_get(req: HttpRequest, data: web::Data<AppState>) -> HttpResponse 
                 Page(
                     T::TitleAdmin,
                     AdminFormHtml(admin_form_from_state(&st), FormErrors::default()),
+                    theme,
                 ),
             ))
             .to_string(),
@@ -798,6 +869,7 @@ async fn admin_post(req: HttpRequest, data: web::Data<AppState>, body: web::Byte
         Err(resp) => return resp,
     };
     let lng = lang_of(&req, &st);
+    let theme = theme_of(&req);
     let f = form_from_body(&body);
     match process_admin(f, &data.0, lng) {
         Ok(Some(form)) => HttpResponse::Ok()
@@ -805,7 +877,7 @@ async fn admin_post(req: HttpRequest, data: web::Data<AppState>, body: web::Byte
             .body(
                 Localized::from((
                     lng,
-                    Page(T::TitleAdmin, AdminFormHtml(form, FormErrors::default())),
+                    Page(T::TitleAdmin, AdminFormHtml(form, FormErrors::default()), theme),
                 ))
                 .to_string(),
             ),
@@ -815,7 +887,11 @@ async fn admin_post(req: HttpRequest, data: web::Data<AppState>, body: web::Byte
         Err((form, errs)) => HttpResponse::BadRequest()
             .content_type("text/html; charset=utf-8")
             .body(
-                Localized::from((lng, Page(T::TitleAdmin, AdminFormHtml(form, errs)))).to_string(),
+                Localized::from((
+                    lng,
+                    Page(T::TitleAdmin, AdminFormHtml(form, errs), theme),
+                ))
+                .to_string(),
             ),
     }
 }
@@ -834,6 +910,27 @@ async fn switch_lang(req: HttpRequest, path: web::Path<String>) -> HttpResponse 
         .insert_header((
             actix_web::http::header::SET_COOKIE,
             format!("lang={lng}; Path=/; Max-Age=31536000; SameSite=Lax"),
+        ))
+        .finish()
+}
+
+async fn switch_theme(req: HttpRequest, path: web::Path<String>) -> HttpResponse {
+    let theme = match path.into_inner().as_str() {
+        "light" => "light",
+        "dark" => "dark",
+        _ => "auto",
+    };
+    let back = req
+        .headers()
+        .get(actix_web::http::header::REFERER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("/")
+        .to_string();
+    HttpResponse::SeeOther()
+        .insert_header((LOCATION, back))
+        .insert_header((
+            actix_web::http::header::SET_COOKIE,
+            format!("theme={theme}; Path=/; Max-Age=31536000; SameSite=Lax"),
         ))
         .finish()
 }
@@ -966,6 +1063,7 @@ async fn serve(bind: String, db_path: PathBuf) -> std::io::Result<()> {
             .route("/admin", web::get().to(admin_get))
             .route("/admin", web::post().to(admin_post))
             .route("/lang/{code}", web::get().to(switch_lang))
+            .route("/theme/{code}", web::get().to(switch_theme))
     })
     .bind(bind)?
     .run()
@@ -978,6 +1076,11 @@ fn lang_from_headers(h: &http::HeaderMap, st: &State) -> Lang {
         .get(http::header::ACCEPT_LANGUAGE)
         .and_then(|v| v.to_str().ok());
     Lang::from_req(cookie, al, st.default_lang.unwrap_or(Lang::En))
+}
+
+fn theme_from_headers(h: &http::HeaderMap) -> Theme {
+    let cookie = h.get(http::header::COOKIE).and_then(|v| v.to_str().ok());
+    Theme::from_req(cookie)
 }
 
 fn form_from_body(body: &[u8]) -> AdminForm {
@@ -1061,6 +1164,7 @@ fn redirect(
 fn route_cgi(
     st: &State,
     lng: Lang,
+    theme: Theme,
     method: &Method,
     path: &str,
     headers: &http::HeaderMap,
@@ -1084,6 +1188,25 @@ fn route_cgi(
             )),
         );
     }
+    if path.ends_with("/theme/auto")
+        || path.ends_with("/theme/light")
+        || path.ends_with("/theme/dark")
+    {
+        let code = ["auto", "light", "dark"]
+            .into_iter()
+            .find(|c| path.ends_with(&format!("/theme/{c}")))
+            .unwrap_or("auto");
+        let back = headers
+            .get(http::header::REFERER)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("/");
+        return redirect(
+            back,
+            Some(&format!(
+                "theme={code}; Path=/; Max-Age=31536000; SameSite=Lax"
+            )),
+        );
+    }
     if path == "/admin" || path.ends_with("/admin") {
         if *method == Method::POST {
             let f = form_from_body(&body);
@@ -1091,16 +1214,22 @@ fn route_cgi(
                 Ok(Some(form)) => {
                     let html = Localized::from((
                         lng,
-                        Page(T::TitleAdmin, AdminFormHtml(form, FormErrors::default())),
+                        Page(
+                            T::TitleAdmin,
+                            AdminFormHtml(form, FormErrors::default()),
+                            theme,
+                        ),
                     ))
                     .to_string();
                     respond(StatusCode::OK, html)
                 }
                 Ok(None) => redirect("/", None),
                 Err((form, errs)) => {
-                    let html =
-                        Localized::from((lng, Page(T::TitleAdmin, AdminFormHtml(form, errs))))
-                            .to_string();
+                    let html = Localized::from((
+                        lng,
+                        Page(T::TitleAdmin, AdminFormHtml(form, errs), theme),
+                    ))
+                    .to_string();
                     respond(StatusCode::BAD_REQUEST, html)
                 }
             };
@@ -1110,12 +1239,13 @@ fn route_cgi(
             Page(
                 T::TitleAdmin,
                 AdminFormHtml(admin_form_from_state(st), FormErrors::default()),
+                theme,
             ),
         ))
         .to_string();
         return respond(StatusCode::OK, html);
     }
-    let html = Localized::from((lng, Page(T::TitleHome, HomeHtml(st)))).to_string();
+    let html = Localized::from((lng, Page(T::TitleHome, HomeHtml(st), theme))).to_string();
     respond(StatusCode::OK, html)
 }
 
@@ -1153,8 +1283,9 @@ async fn cgi_run(db: PathBuf) -> std::io::Result<()> {
                 .map_err(std::io::Error::other)?
                 .to_bytes();
             let lng = lang_from_headers(&headers, &st);
+            let theme = theme_from_headers(&headers);
             let resp: Result<http::Response<BoxBody<Bytes, std::io::Error>>, std::io::Error> =
-                Ok(route_cgi(&st, lng, &method, &path, &headers, body));
+                Ok(route_cgi(&st, lng, theme, &method, &path, &headers, body));
             resp
         },
     )
@@ -1221,10 +1352,11 @@ async fn fcgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
                         let body = read_body_capped(request.into_body(), content_length).await?;
                         let st = State::load(db).map_err(std::io::Error::other)?;
                         let lng = lang_from_headers(&headers, &st);
+                        let theme = theme_from_headers(&headers);
                         let resp: Result<
                             http::Response<BoxBody<Bytes, std::io::Error>>,
                             std::io::Error,
-                        > = Ok(route_cgi(&st, lng, &method, &path, &headers, body));
+                        > = Ok(route_cgi(&st, lng, theme, &method, &path, &headers, body));
                         resp
                     }
                 })
@@ -1254,10 +1386,11 @@ async fn scgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
                     let body = read_body_capped(request.into_body(), content_length).await?;
                     let st = State::load(db).map_err(std::io::Error::other)?;
                     let lng = lang_from_headers(&headers, &st);
+                    let theme = theme_from_headers(&headers);
                     let resp: Result<
                         http::Response<BoxBody<Bytes, std::io::Error>>,
                         std::io::Error,
-                    > = Ok(route_cgi(&st, lng, &method, &path, &headers, body));
+                    > = Ok(route_cgi(&st, lng, theme, &method, &path, &headers, body));
                     resp
                 }
             })
@@ -1298,6 +1431,17 @@ mod tests {
             chrono::NaiveDateTime::parse_from_str(&format!("{date} {time}"), "%Y-%m-%d %H:%M")
                 .unwrap();
         naive.and_local_timezone(st.timezone).earliest().unwrap()
+    }
+
+    #[test]
+    fn theme_parses_cookie_and_cycles() {
+        assert_eq!(Theme::from_req(None), Theme::Auto);
+        assert_eq!(Theme::from_req(Some("theme=light")), Theme::Light);
+        assert_eq!(Theme::from_req(Some("lang=it; theme=dark")), Theme::Dark);
+        assert_eq!(Theme::from_req(Some("theme=bogus")), Theme::Auto);
+        assert_eq!(Theme::Auto.next(), Theme::Light);
+        assert_eq!(Theme::Light.next(), Theme::Dark);
+        assert_eq!(Theme::Dark.next(), Theme::Auto);
     }
 
     #[test]
@@ -1463,10 +1607,11 @@ mod tests {
                         .unwrap_or(0);
                     let body = read_body_capped(request.into_body(), content_length).await?;
                     let lng = lang_from_headers(&headers, &st);
+                    let theme = theme_from_headers(&headers);
                     let resp: Result<
                         http::Response<BoxBody<Bytes, std::io::Error>>,
                         std::io::Error,
-                    > = Ok(route_cgi(&st, lng, &method, &path, &headers, body));
+                    > = Ok(route_cgi(&st, lng, theme, &method, &path, &headers, body));
                     resp
                 }
             })
@@ -1544,10 +1689,11 @@ mod tests {
                         .unwrap_or(0);
                     let body = read_body_capped(request.into_body(), content_length).await?;
                     let lng = lang_from_headers(&headers, &st);
+                    let theme = theme_from_headers(&headers);
                     let resp: Result<
                         http::Response<BoxBody<Bytes, std::io::Error>>,
                         std::io::Error,
-                    > = Ok(route_cgi(&st, lng, &method, &path, &headers, body));
+                    > = Ok(route_cgi(&st, lng, theme, &method, &path, &headers, body));
                     resp
                 }
             })
@@ -1649,7 +1795,8 @@ mod tests {
             .unwrap_or(0);
         let body = read_body_capped(request.into_body(), content_length).await?;
         let lng = lang_from_headers(&headers, st);
-        Ok(route_cgi(st, lng, &method, &path, &headers, body))
+        let theme = theme_from_headers(&headers);
+        Ok(route_cgi(st, lng, theme, &method, &path, &headers, body))
     }
 
     #[tokio::test]
