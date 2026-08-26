@@ -258,10 +258,12 @@ impl<Title: LocalizedDisplay, Body: LocalizedDisplay> LocalizedDisplay for Page<
             ".field input[type=text]{flex:1;width:auto;border-right:none;border-radius:.3rem 0 0 .3rem}",
             ".field button{border-radius:0 .3rem .3rem 0}",
             ".add-btn{padding:.05rem .5rem;font-size:.75rem;vertical-align:middle}",
-            ".weeks input[type=checkbox]{position:absolute;opacity:0;pointer-events:none}",
-            ".weeks label{display:inline-block;padding:.15rem .55rem;margin:0 .2rem .2rem 0;border-radius:.3rem;cursor:pointer;background:#888;color:#fff;font-size:.9rem}",
+            ".weeks input[type=checkbox]{position:static;opacity:1;pointer-events:auto}",
+            ".weeks label{display:inline-block;padding:.15rem .55rem;margin:0 .2rem .2rem 0;border-radius:.3rem;background:#888;color:#fff;font-size:.9rem}",
             ".weeks input:checked + label{background:#2e7d32}",
+            ".weeks label.bad{background:#c62828}",
             ".weeks input:checked + label.bad{background:#c62828}",
+            "@supports selector(:checked){.weeks input[type=checkbox]{position:absolute;opacity:0;pointer-events:none}.weeks label{cursor:pointer}}",
             "form p{margin:.6rem 0}",
             "button{padding:.5rem 1.2rem;cursor:pointer}",
             "@media (prefers-color-scheme:dark) {",
@@ -430,7 +432,50 @@ struct FormErrors {
     bad_weeks: HashMap<(&'static str, usize), Vec<u32>>,
 }
 
-fn row_html2<'a>(
+fn overlap_pattern(lng: Lang) -> &'static str {
+    match lng {
+        Lang::It => "Sovrapposizione: %s della %dª settimana già assegnato.",
+        Lang::En => "Overlap: %s of week %d already assigned.",
+    }
+}
+
+fn js_json_str(f: &mut fmt::Formatter<'_>, s: &str) -> fmt::Result {
+    f.write_char('"')?;
+    for c in s.chars() {
+        match c {
+            '"' => f.write_str("\\\"")?,
+            '\\' => f.write_str("\\\\")?,
+            '\n' => f.write_str("\\n")?,
+            '<' => f.write_str("\\u003c")?,
+            '>' => f.write_str("\\u003e")?,
+            '&' => f.write_str("\\u0026")?,
+            _ => f.write_char(c)?,
+        }
+    }
+    f.write_char('"')
+}
+
+fn write_admin_i18n_json(lng: Lang, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str("const I18N = {\"errTime\":")?;
+    js_json_str(f, &Localized::from((lng, T::ErrTime)).to_string())?;
+    f.write_str(",\"errType\":")?;
+    js_json_str(f, &Localized::from((lng, T::ErrType)).to_string())?;
+    f.write_str(",\"errOverlap\":")?;
+    js_json_str(f, overlap_pattern(lng))?;
+    f.write_str(",\"days\":{")?;
+    let full = days_full(lng);
+    for (i, day) in DAY_KEYS.iter().enumerate() {
+        if i > 0 {
+            f.write_char(',')?;
+        }
+        js_json_str(f, day)?;
+        f.write_char(':')?;
+        js_json_str(f, full[i])?;
+    }
+    f.write_str("}};")
+}
+
+fn row_html<'a>(
     day: &'a str,
     idx: usize,
     e: &'a Entry,
@@ -451,7 +496,9 @@ fn row_html2<'a>(
                 .get(&(self.day, self.idx))
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            f.write_str("<p><span class=\"weeks\">")?;
+            f.write_str("<p class=\"row\" data-day=\"")?;
+            fmt::Display::fmt(&self.day, f)?;
+            f.write_str("\"><span class=\"weeks\">")?;
             for w in 1..=5 {
                 f.write_str("<input type=\"checkbox\" id=\"")?;
                 fmt::Display::fmt(&self.day, f)?;
@@ -528,7 +575,7 @@ impl LocalizedDisplay for AdminFormHtml {
             fmt::Display::fmt(&esc(form_err), f)?;
             f.write_str("</p>")?;
         }
-        f.write_str("<form method=\"post\" action=\"/admin\">")?;
+        f.write_str("<form method=\"post\" action=\"/admin\" id=\"admin-form\">")?;
         f.write_str("<p><label>")?;
         fmt::Display::fmt(&esc(Localized::from((lng, T::PickupTimeLabel))), f)?;
         f.write_str("<br><input type=\"text\" name=\"pickup_time\" value=\"")?;
@@ -599,7 +646,7 @@ impl LocalizedDisplay for AdminFormHtml {
             f.write_str("\">+</button></h3>")?;
 
             for (idx, e) in day_entries.iter().enumerate() {
-                fmt::Display::fmt(&row_html2(day, idx, e, &self.1), f)?;
+                fmt::Display::fmt(&row_html(day, idx, e, &self.1), f)?;
             }
         }
 
@@ -610,7 +657,11 @@ impl LocalizedDisplay for AdminFormHtml {
             "<p><button type=\"submit\" name=\"save\">"
         ))?;
         fmt::Display::fmt(&esc(Localized::from((lng, T::Save))), f)?;
-        f.write_str(concat!("</button></p>", "</form>"))
+        f.write_str(concat!("</button></p>", "</form>"))?;
+        f.write_str("<script>")?;
+        write_admin_i18n_json(lng, f)?;
+        f.write_str(include_str!("admin.js"))?;
+        f.write_str("</script>")
     }
 }
 
@@ -646,33 +697,39 @@ fn validate_and_save(db_path: &PathBuf, f: &AdminForm, lng: Lang) -> Result<(), 
         let mut day_entries: Vec<&Entry> = f.entries.iter().filter(|e| e.day == *day).collect();
         day_entries.sort_by_key(|e| sort_key(e));
         for (idx, e) in day_entries.iter().enumerate() {
-            if !e.kind.trim().is_empty() {
-                let di = day_index_of(day);
-                let mut weeks: Vec<u32> = e
-                    .weeks
-                    .iter()
-                    .copied()
-                    .filter(|w| (1..=5).contains(w))
-                    .collect();
-                weeks.sort_unstable();
-                weeks.dedup();
-                if !weeks.is_empty() {
-                    for w in &weeks {
-                        if !seen.insert((e.day.clone(), *w)) {
-                            let key = format!("{day}:{idx}");
-                            errs.fields.entry(key).or_insert_with(|| {
-                                Localized::from((lng, T::ErrOverlap(days_full(lng)[di], *w)))
-                                    .to_string()
-                            });
-                            errs.bad_weeks.entry((day, idx)).or_default().push(*w);
-                        }
-                    }
-                    schedule.push(Entry {
-                        day: e.day.clone(),
-                        weeks,
-                        kind: e.kind.trim().to_string(),
-                    });
+            let di = day_index_of(day);
+            let mut weeks: Vec<u32> = e
+                .weeks
+                .iter()
+                .copied()
+                .filter(|w| (1..=5).contains(w))
+                .collect();
+            weeks.sort_unstable();
+            weeks.dedup();
+            if !weeks.is_empty() {
+                if e.kind.trim().is_empty() {
+                    let key = format!("{day}:{idx}");
+                    errs.fields.insert(
+                        key,
+                        Localized::from((lng, T::ErrType)).to_string(),
+                    );
+                    continue;
                 }
+                for w in &weeks {
+                    if !seen.insert((e.day.clone(), *w)) {
+                        let key = format!("{day}:{idx}");
+                        errs.fields.entry(key).or_insert_with(|| {
+                            Localized::from((lng, T::ErrOverlap(days_full(lng)[di], *w)))
+                                .to_string()
+                        });
+                        errs.bad_weeks.entry((day, idx)).or_default().push(*w);
+                    }
+                }
+                schedule.push(Entry {
+                    day: e.day.clone(),
+                    weeks,
+                    kind: e.kind.trim().to_string(),
+                });
             }
         }
     }
@@ -1324,6 +1381,40 @@ mod tests {
         let errs = validate_and_save(&PathBuf::from("/nonexistent"), &f, Lang::It).unwrap_err();
         assert!(errs.fields.contains_key("monday:1"));
         assert_eq!(errs.bad_weeks.get(&("monday", 1)).unwrap(), &[2]);
+    }
+
+    #[test]
+    fn empty_type_rejected() {
+        let f = AdminForm {
+            timezone: "Europe/Rome".to_string(),
+            pickup_time: "17:00".to_string(),
+            entries: vec![
+                Entry {
+                    day: "monday".to_string(),
+                    weeks: vec![1],
+                    kind: "Carta".to_string(),
+                },
+                Entry {
+                    day: "monday".to_string(),
+                    weeks: vec![2],
+                    kind: String::new(),
+                },
+            ],
+            action: "save".to_string(),
+            default_lang: String::new(),
+        };
+        let errs = validate_and_save(&PathBuf::from("/nonexistent"), &f, Lang::It).unwrap_err();
+        assert!(errs.fields.contains_key("monday:1"));
+        assert!(errs.bad_weeks.is_empty());
+        // zero weeks but empty type: row ignored, no error
+        let f2 = AdminForm { entries: vec![Entry {
+            day: "monday".to_string(),
+            weeks: Vec::new(),
+            kind: String::new(),
+        }], ..f };
+        let path = std::env::temp_dir().join(format!("trashdiff_empty_type_{}", std::process::id()));
+        assert!(validate_and_save(&path, &f2, Lang::It).is_ok());
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

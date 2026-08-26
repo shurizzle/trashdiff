@@ -92,6 +92,7 @@ pub enum T<'a> {
     ErrTime,
     ErrIo,
     ErrLang,
+    ErrType,
     ErrOverlap(&'a str, u32),
 }
 
@@ -187,6 +188,7 @@ impl<'a> fmt::Display for LocalizedT<'a> {
                 T::ErrTime => f.write_str("orario ritiro non valido (atteso HH:MM)"),
                 T::ErrIo => f.write_str("errore salvataggio database"),
                 T::ErrLang => f.write_str("lingua di default non valida"),
+                T::ErrType => f.write_str("tipo non compilato per le settimane spuntate"),
                 T::ErrOverlap(day, which) => {
                     f.write_str("Sovrapposizione: ")?;
                     f.write_str(day)?;
@@ -247,6 +249,7 @@ impl<'a> fmt::Display for LocalizedT<'a> {
                 T::ErrTime => f.write_str("invalid pickup_time (expected HH:MM)"),
                 T::ErrIo => f.write_str("database save error"),
                 T::ErrLang => f.write_str("invalid default language"),
+                T::ErrType => f.write_str("type required for selected weeks"),
                 T::ErrOverlap(day, which) => {
                     f.write_str("Overlap: ")?;
                     f.write_str(day)?;
