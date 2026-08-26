@@ -541,7 +541,6 @@ impl LocalizedDisplay for AdminFormHtml {
             if tz.name() == self.0.timezone {
                 f.write_str(" selected")?;
             }
-            fmt::Display::fmt(&esc(tz), f)?;
             f.write_char('>')?;
             fmt::Display::fmt(&esc(tz), f)?;
             f.write_str("</option>")?;
