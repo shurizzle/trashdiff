@@ -21,6 +21,14 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-std", "io-util", "net", "macros"] }
 toml = "1.1"
 
+[build-dependencies]
+oxc_allocator = "0.148"
+oxc_codegen = "0.148"
+oxc_mangler = "0.148"
+oxc_minifier = "0.148"
+oxc_parser = "0.148"
+oxc_span = "0.148"
+
 [dev-dependencies]
 futures-util = "0.3"
 tokio-util = "0.7"

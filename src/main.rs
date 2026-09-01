@@ -527,7 +527,7 @@ fn js_json_str(f: &mut fmt::Formatter<'_>, s: &str) -> fmt::Result {
 }
 
 fn write_admin_i18n_json(lng: Lang, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    f.write_str("const I18N = {\"errTime\":")?;
+    f.write_str("const I18N={\"errTime\":")?;
     js_json_str(f, &Localized::from((lng, T::ErrTime)).to_string())?;
     f.write_str(",\"errType\":")?;
     js_json_str(f, &Localized::from((lng, T::ErrType)).to_string())?;
@@ -731,7 +731,7 @@ impl LocalizedDisplay for AdminFormHtml {
         f.write_str(concat!("</button></p>", "</form>"))?;
         f.write_str("<script>")?;
         write_admin_i18n_json(lng, f)?;
-        f.write_str(include_str!("admin.js"))?;
+        f.write_str(include_str!(concat!(env!("OUT_DIR"), "/admin.min.js")))?;
         f.write_str("</script>")
     }
 }
