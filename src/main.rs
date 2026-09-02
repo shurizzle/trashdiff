@@ -304,38 +304,12 @@ impl<Title: LocalizedDisplay, Body: LocalizedDisplay> LocalizedDisplay for Page<
         f.write_str(concat!(
             "</title>",
             "<style>",
-            "body{font-family:system-ui,sans-serif;max-width:640px;margin:2rem auto;padding:0 1rem;color:#222}",
-            "table{border-collapse:collapse;width:100%}",
-            "th,td{border:1px solid #ccc;padding:.4rem .6rem;text-align:left}",
-            "th{background:#f2f2f2}",
-            ".now{background:#e7f6e7;padding:.8rem;border-radius:.5rem;margin:1rem 0}",
-            "nav a{margin-right:1rem}",
-            ".err{background:#fdecea;color:#b00020;padding:.6rem;border-radius:.5rem}",
-            "input[type=text]{width:100%;box-sizing:border-box;padding:.4rem}",
-            ".field{display:flex}",
-            ".field input[type=text]{flex:1;width:auto;border-right:none;border-radius:.3rem 0 0 .3rem}",
-            ".field button{border-radius:0 .3rem .3rem 0}",
-            ".add-btn{padding:.05rem .5rem;font-size:.75rem;vertical-align:middle}",
-            ".weeks input[type=checkbox]{position:static;opacity:1;pointer-events:auto}",
-            ".weeks label{display:inline-block;padding:.15rem .55rem;margin:0 .2rem .2rem 0;border-radius:.3rem;background:#888;color:#fff;font-size:.9rem}",
-            ".weeks input:checked + label{background:#2e7d32}",
-            ".weeks label.bad{background:#c62828}",
-            ".weeks input:checked + label.bad{background:#c62828}",
-            "@supports selector(:checked){.weeks input[type=checkbox]{position:absolute;opacity:0;pointer-events:none}.weeks label{cursor:pointer}}",
-            "form p{margin:.6rem 0}",
-            "button{padding:.5rem 1.2rem;cursor:pointer}",
         ))?;
-        let dark = concat!(
-            "body{color:#ddd;background:#1e1e1e}",
-            "th,td{border-color:#444}",
-            "th{background:#2a2a2a}",
-            ".now{background:#1e3a2b}",
-            ".err{background:#4a1f1f;color:#ffb4ab}",
-            "a{color:#8ab4f8}",
-        );
+        f.write_str(include_str!(concat!(env!("OUT_DIR"), "/style.min.css")))?;
+        let dark = include_str!(concat!(env!("OUT_DIR"), "/dark.min.css"));
         match self.2 {
             Theme::Auto => {
-                f.write_str("@media (prefers-color-scheme:dark) {")?;
+                f.write_str("@media(prefers-color-scheme:dark){")?;
                 f.write_str(dark)?;
                 f.write_str("}")?;
             }

@@ -1,0 +1,27 @@
+body {
+  color: #ddd;
+  background: #1e1e1e;
+}
+
+th,
+td {
+  border-color: #444;
+}
+
+th {
+  background: #2a2a2a;
+}
+
+.now {
+  background: #1e3a2b;
+}
+
+.err {
+  background: #4a1f1f;
+  color: #ffb4ab;
+}
+
+a {
+  color: #8ab4f8;
+}
+
