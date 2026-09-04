@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use actix_web::http::header::{COOKIE, LOCATION};
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, web};
+use bitflags::bitflags;
 use bytes::Bytes;
 use chrono::{DateTime, Datelike, Duration, NaiveTime, Utc, Weekday};
 use chrono_tz::{TZ_VARIANTS, Tz};
@@ -13,7 +14,7 @@ use clap::{Parser, Subcommand};
 use http::{Method, StatusCode};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
-use serde::ser::SerializeStruct;
+use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize};
 
 mod i18n;
@@ -21,6 +22,96 @@ mod i18n;
 use i18n::{Lang, days, days_full};
 
 use crate::i18n::{Localized, LocalizedDisplay, LocalizedRef, T, esc};
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    struct Week: u8 {
+        const FIRST = 0b00000001;
+        const SECOND = 0b00000010;
+        const THIRD = 0b00000100;
+        const FOURTH = 0b00001000;
+        const FIFTH = 0b00010000;
+    }
+}
+
+impl Serialize for Week {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut seq = serializer.serialize_seq(None)?;
+        if self.contains(Self::FIRST) {
+            seq.serialize_element(&1u8)?;
+        }
+        if self.contains(Self::SECOND) {
+            seq.serialize_element(&2u8)?;
+        }
+        if self.contains(Self::THIRD) {
+            seq.serialize_element(&3u8)?;
+        }
+        if self.contains(Self::FOURTH) {
+            seq.serialize_element(&4u8)?;
+        }
+        if self.contains(Self::FIFTH) {
+            seq.serialize_element(&5u8)?;
+        }
+        seq.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Week {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Week;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a sequence of week numbers 1..=5")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Week, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut w = Week::empty();
+                while let Some(n) = seq.next_element::<u8>()? {
+                    w |= match n {
+                        1 => Week::FIRST,
+                        2 => Week::SECOND,
+                        3 => Week::THIRD,
+                        4 => Week::FOURTH,
+                        5 => Week::FIFTH,
+                        _ => return Err(serde::de::Error::custom("week must be in 1..=5")),
+                    };
+                }
+                Ok(w)
+            }
+        }
+
+        deserializer.deserialize_seq(Visitor)
+    }
+}
+
+impl Default for Week {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+fn week_of(n: u32) -> Week {
+    match n {
+        1 => Week::FIRST,
+        2 => Week::SECOND,
+        3 => Week::THIRD,
+        4 => Week::FOURTH,
+        5 => Week::FIFTH,
+        _ => Week::empty(),
+    }
+}
 
 const DAY_KEYS: [&str; 7] = [
     "monday",
@@ -44,10 +135,7 @@ fn day_index_of(day: &str) -> usize {
 }
 
 fn sort_key(e: &Entry) -> (bool, u32) {
-    (
-        e.weeks.is_empty(),
-        e.weeks.iter().min().copied().unwrap_or(0),
-    )
+    (e.weeks.is_empty(), e.weeks.bits().trailing_zeros())
 }
 
 fn lang_of(req: &HttpRequest, st: &State) -> Lang {
@@ -135,7 +223,7 @@ struct DbOld {
 #[derive(Serialize, Deserialize, Clone)]
 struct Entry {
     day: String,
-    weeks: Vec<u32>,
+    weeks: Week,
     #[serde(rename = "type")]
     kind: String,
 }
@@ -155,7 +243,7 @@ fn migrate_old(old: DbOld) -> Db {
         .into_iter()
         .map(|(day, kind)| Entry {
             day,
-            weeks: vec![1, 2, 3, 4, 5],
+            weeks: Week::all(),
             kind,
         })
         .collect();
@@ -247,7 +335,7 @@ impl State {
         let week = week_of_month(date);
         self.schedule
             .iter()
-            .find(|e| e.day == day && e.weeks.contains(&week))
+            .find(|e| e.day == day && e.weeks.contains(week_of(week)))
             .map(|e| e.kind.as_str())
             .unwrap_or("")
     }
@@ -480,7 +568,7 @@ async fn home_json_endpoint(_req: HttpRequest, data: web::Data<AppState>) -> Htt
 
 #[derive(Serialize)]
 struct AdminRow {
-    weeks: Vec<u32>,
+    weeks: Week,
     #[serde(rename = "type")]
     kind: String,
 }
@@ -511,11 +599,11 @@ fn admin_json(st: &State) -> AdminJson {
             .iter()
             .filter(|e| e.day == day)
             .map(|e| AdminRow {
-                weeks: e.weeks.clone(),
+                weeks: e.weeks,
                 kind: e.kind.clone(),
             })
             .collect();
-        rows.sort_by_key(|r| r.weeks.iter().copied().min().unwrap_or(0));
+        rows.sort_by_key(|r| r.weeks.bits().trailing_zeros());
         rows
     };
     AdminJson {
@@ -580,7 +668,7 @@ struct AdminForm {
 #[derive(Default)]
 struct FormErrors {
     fields: HashMap<String, String>,
-    bad_weeks: HashMap<(&'static str, usize), Vec<u32>>,
+    bad_weeks: HashMap<(&'static str, usize), Week>,
 }
 
 fn overlap_pattern(lng: Lang) -> &'static str {
@@ -645,8 +733,8 @@ fn row_html<'a>(
                 .errs
                 .bad_weeks
                 .get(&(self.day, self.idx))
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
+                .copied()
+                .unwrap_or_default();
             f.write_str("<p class=\"row\" data-day=\"")?;
             fmt::Display::fmt(&self.day, f)?;
             f.write_str("\"><span class=\"weeks\">")?;
@@ -664,10 +752,10 @@ fn row_html<'a>(
                 f.write_str("\" value=\"")?;
                 fmt::Display::fmt(&w, f)?;
                 f.write_char('"')?;
-                if self.e.weeks.contains(&w) {
+                if self.e.weeks.contains(week_of(w)) {
                     f.write_str(" checked")?;
                 }
-                if bad.contains(&w) {
+                if bad.contains(week_of(w)) {
                     f.write_str(" class=\"bad\"")?;
                 }
                 f.write_char('>')?;
@@ -679,7 +767,7 @@ fn row_html<'a>(
                 f.write_char('_')?;
                 fmt::Display::fmt(&w, f)?;
                 f.write_char('"')?;
-                if bad.contains(&w) {
+                if bad.contains(week_of(w)) {
                     f.write_str(" class=\"bad\"")?;
                 }
                 f.write_char('>')?;
@@ -849,14 +937,7 @@ fn validate_and_save(db_path: &PathBuf, f: &AdminForm, lng: Lang) -> Result<(), 
         day_entries.sort_by_key(|e| sort_key(e));
         for (idx, e) in day_entries.iter().enumerate() {
             let di = day_index_of(day);
-            let mut weeks: Vec<u32> = e
-                .weeks
-                .iter()
-                .copied()
-                .filter(|w| (1..=5).contains(w))
-                .collect();
-            weeks.sort_unstable();
-            weeks.dedup();
+            let weeks = e.weeks;
             if !weeks.is_empty() {
                 if e.kind.trim().is_empty() {
                     let key = format!("{day}:{idx}");
@@ -864,14 +945,19 @@ fn validate_and_save(db_path: &PathBuf, f: &AdminForm, lng: Lang) -> Result<(), 
                         .insert(key, Localized::from((lng, T::ErrType)).to_string());
                     continue;
                 }
-                for w in &weeks {
-                    if !seen.insert((e.day.clone(), *w)) {
+                for w in 1..=5 {
+                    if !weeks.contains(week_of(w)) {
+                        continue;
+                    }
+                    if !seen.insert((e.day.clone(), w)) {
                         let key = format!("{day}:{idx}");
                         errs.fields.entry(key).or_insert_with(|| {
-                            Localized::from((lng, T::ErrOverlap(days_full(lng)[di], *w)))
-                                .to_string()
+                            Localized::from((lng, T::ErrOverlap(days_full(lng)[di], w))).to_string()
                         });
-                        errs.bad_weeks.entry((day, idx)).or_default().push(*w);
+                        errs.bad_weeks
+                            .entry((day, idx))
+                            .or_default()
+                            .insert(week_of(w));
                     }
                 }
                 schedule.push(Entry {
@@ -909,14 +995,13 @@ fn process_admin(
     lng: Lang,
 ) -> Result<Option<AdminForm>, (AdminForm, FormErrors)> {
     if let Some(day) = f.action.strip_prefix("add:") {
-        let mut covered: HashSet<u32> = HashSet::new();
+        let mut covered = Week::empty();
         for e in f.entries.iter().filter(|e| e.day == day) {
-            covered.extend(e.weeks.iter().copied());
+            covered |= e.weeks;
         }
-        let weeks: Vec<u32> = (1..=5).filter(|w| !covered.contains(w)).collect();
         f.entries.push(Entry {
             day: day.to_string(),
-            weeks,
+            weeks: Week::all().difference(covered),
             kind: String::new(),
         });
         return Ok(Some(f));
@@ -1187,7 +1272,11 @@ fn form_from_body(body: &[u8]) -> AdminForm {
             }
             let weeks = groups
                 .get(&format!("{day}_weeks_{i}"))
-                .map(|vs| vs.iter().filter_map(|w| w.parse::<u32>().ok()).collect())
+                .map(|vs| {
+                    vs.iter().fold(Week::empty(), |acc, v| {
+                        acc | v.parse::<u32>().map(week_of).unwrap_or_default()
+                    })
+                })
                 .unwrap_or_default();
             entries.push(Entry {
                 day: day.to_string(),
@@ -1500,16 +1589,20 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    fn w(ws: &[u32]) -> Week {
+        ws.iter().fold(Week::empty(), |acc, &n| acc | week_of(n))
+    }
+
     fn state() -> State {
         let schedule = vec![
             Entry {
                 day: "monday".to_string(),
-                weeks: vec![1],
+                weeks: w(&[1]),
                 kind: "Carta".to_string(),
             },
             Entry {
                 day: "tuesday".to_string(),
-                weeks: vec![1],
+                weeks: w(&[1]),
                 kind: "Umido".to_string(),
             },
         ];
@@ -1584,7 +1677,7 @@ mod tests {
         let mut st = state();
         st.schedule.push(Entry {
             day: "monday".to_string(),
-            weeks: vec![2],
+            weeks: w(&[2]),
             kind: "Plastica".to_string(),
         });
         st.default_lang = Some(Lang::En);
@@ -1603,7 +1696,11 @@ mod tests {
         let tuesday = schedule[1].as_array().unwrap();
         assert_eq!(tuesday.len(), 1);
         assert_eq!(tuesday[0]["type"], "Umido");
-        assert!(schedule[2..].iter().all(|d| d.as_array().unwrap().is_empty()));
+        assert!(
+            schedule[2..]
+                .iter()
+                .all(|d| d.as_array().unwrap().is_empty())
+        );
     }
 
     #[test]
@@ -1651,7 +1748,7 @@ mod tests {
         let mut st = state();
         st.schedule = vec![Entry {
             day: "monday".to_string(),
-            weeks: vec![2],
+            weeks: w(&[2]),
             kind: "Carta".to_string(),
         }];
         // 2024-01-01 is Monday of week 1: not collected -> pause
@@ -1672,12 +1769,12 @@ mod tests {
             entries: vec![
                 Entry {
                     day: "monday".to_string(),
-                    weeks: vec![1, 2],
+                    weeks: w(&[1, 2]),
                     kind: "Carta".to_string(),
                 },
                 Entry {
                     day: "monday".to_string(),
-                    weeks: vec![2, 3],
+                    weeks: w(&[2, 3]),
                     kind: "Plastica".to_string(),
                 },
             ],
@@ -1686,7 +1783,7 @@ mod tests {
         };
         let errs = validate_and_save(&PathBuf::from("/nonexistent"), &f, Lang::It).unwrap_err();
         assert!(errs.fields.contains_key("monday:1"));
-        assert_eq!(errs.bad_weeks.get(&("monday", 1)).unwrap(), &[2]);
+        assert_eq!(errs.bad_weeks.get(&("monday", 1)), Some(&week_of(2)));
     }
 
     #[test]
@@ -1697,12 +1794,12 @@ mod tests {
             entries: vec![
                 Entry {
                     day: "monday".to_string(),
-                    weeks: vec![1],
+                    weeks: w(&[1]),
                     kind: "Carta".to_string(),
                 },
                 Entry {
                     day: "monday".to_string(),
-                    weeks: vec![2],
+                    weeks: w(&[2]),
                     kind: String::new(),
                 },
             ],
@@ -1716,7 +1813,7 @@ mod tests {
         let f2 = AdminForm {
             entries: vec![Entry {
                 day: "monday".to_string(),
-                weeks: Vec::new(),
+                weeks: Week::empty(),
                 kind: String::new(),
             }],
             ..f
@@ -1738,7 +1835,7 @@ mod tests {
         let st = State::load(path.clone()).unwrap();
         assert_eq!(st.schedule.len(), 2);
         for e in &st.schedule {
-            assert_eq!(e.weeks, vec![1, 2, 3, 4, 5]);
+            assert_eq!(e.weeks, Week::all());
         }
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("[[schedule]]"));

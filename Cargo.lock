@@ -2648,6 +2648,7 @@ name = "trashdiff"
 version = "0.4.2"
 dependencies = [
  "actix-web",
+ "bitflags",
  "bytes",
  "cegla-cgi",
  "cegla-fcgi",
