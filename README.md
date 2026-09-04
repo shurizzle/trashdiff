@@ -93,6 +93,10 @@ trashdiff cli
 ## Web interface
 
 - `/` — what to throw now, today's pickup, weekly table (current week)
+- `/home.json` — same view as JSON: `timezone`, `pickup_time` (`HH:MM`),
+  `now` (`kind` = waste type currently out, `null` = pause, with `until` =
+  when it ends) and `week` as waste-type strings (or `null` when nothing is
+  collected); `week` is the current week, 7 entries Monday..Sunday
 - `/admin` — backoffice: one row per pickup under each weekday (weekdays are
   fixed and always shown). Tick weeks 1-5 and type the waste type; `+`
   duplicates that weekday, `-` removes the row, no JS needed. Plus global

@@ -1,6 +1,6 @@
 use std::fmt::{self, Write};
 
-use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc, Weekday};
+use chrono::{DateTime, Datelike, NaiveDate, Weekday};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
@@ -77,8 +77,6 @@ pub enum T<'a> {
     NowOpen(&'a str),
     WindowUntil(DateTime<Tz>),
     Pause(DateTime<Tz>),
-    TodayPickup(Tz, &'a str, NaiveTime),
-    TodayNone(Tz),
     Week(NaiveDate),
     ColDay,
     ColType,
@@ -155,19 +153,6 @@ impl<'a> fmt::Display for LocalizedT<'a> {
                     LocalizedDisplay::fmt(dt, Lang::It, f)?;
                     f.write_char('.')
                 }
-                T::TodayPickup(tz, what, hour) => {
-                    f.write_str("Oggi (")?;
-                    fmt::Display::fmt(&Utc::now().with_timezone(tz).format("%d/%m"), f)?;
-                    f.write_str(") ritirano: ")?;
-                    f.write_str(what)?;
-                    f.write_str(" alle ")?;
-                    fmt::Display::fmt(&hour.format("%H:%M"), f)
-                }
-                T::TodayNone(tz) => {
-                    f.write_str("Oggi (")?;
-                    fmt::Display::fmt(&Utc::now().with_timezone(tz).format("%d/%m"), f)?;
-                    f.write_str(") nessun ritiro.")
-                }
                 T::Week(date) => {
                     fmt::Display::fmt(&week_of_month(*date), f)?;
                     f.write_str("ª settimana")
@@ -215,19 +200,6 @@ impl<'a> fmt::Display for LocalizedT<'a> {
                     f.write_str("Pause: no pickup running. Next pickup from ")?;
                     LocalizedDisplay::fmt(dt, Lang::En, f)?;
                     f.write_char('.')
-                }
-                T::TodayPickup(tz, what, hour) => {
-                    f.write_str("Today (")?;
-                    fmt::Display::fmt(&Utc::now().with_timezone(tz).format("%m/%d"), f)?;
-                    f.write_str(") pickup: ")?;
-                    f.write_str(what)?;
-                    f.write_str(" at ")?;
-                    fmt::Display::fmt(&hour.format("%H:%M"), f)
-                }
-                T::TodayNone(tz) => {
-                    f.write_str("Today (")?;
-                    fmt::Display::fmt(&Utc::now().with_timezone(tz).format("%m/%d"), f)?;
-                    f.write_str(") no pickup.")
                 }
                 T::Week(date) => {
                     f.write_str("Week ")?;

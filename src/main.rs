@@ -13,6 +13,7 @@ use clap::{Parser, Subcommand};
 use http::{Method, StatusCode};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 
 mod i18n;
@@ -50,10 +51,7 @@ fn sort_key(e: &Entry) -> (bool, u32) {
 }
 
 fn lang_of(req: &HttpRequest, st: &State) -> Lang {
-    let cookie = req
-        .headers()
-        .get(COOKIE)
-        .and_then(|v| v.to_str().ok());
+    let cookie = req.headers().get(COOKIE).and_then(|v| v.to_str().ok());
     let al = req
         .headers()
         .get(actix_web::http::header::ACCEPT_LANGUAGE)
@@ -301,10 +299,7 @@ impl<Title: LocalizedDisplay, Body: LocalizedDisplay> LocalizedDisplay for Page<
             "<title>"
         ))?;
         fmt::Display::fmt(&esc(LocalizedRef::from((lng, &self.0))), f)?;
-        f.write_str(concat!(
-            "</title>",
-            "<style>",
-        ))?;
+        f.write_str(concat!("</title>", "<style>",))?;
         f.write_str(include_str!(concat!(env!("OUT_DIR"), "/style.min.css")))?;
         let dark = include_str!(concat!(env!("OUT_DIR"), "/dark.min.css"));
         match self.2 {
@@ -336,53 +331,33 @@ impl<Title: LocalizedDisplay, Body: LocalizedDisplay> LocalizedDisplay for Page<
     }
 }
 
-pub struct HomeHtml<'a>(&'a State);
+pub struct HomeHtml<'a>(&'a HomeView);
 
 impl<'a> LocalizedDisplay for HomeHtml<'a> {
     fn fmt(&self, lng: Lang, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let now = Utc::now().with_timezone(&self.0.timezone);
-        let pickup = self.0.pickup_time;
-        let (open_date, _owd, open_type) = self.0.next_boundary(now);
-        let today_type = self.0.type_for(now.date_naive());
-
-        let open_dt = open_date
-            .and_time(pickup)
-            .and_local_timezone(self.0.timezone)
-            .earliest()
-            .expect("boundary locale non risolvibile");
+        let view = self.0;
+        let pickup = view.pickup_time;
+        let today = Utc::now().with_timezone(&view.timezone).date_naive();
 
         f.write_str("<h1>")?;
         fmt::Display::fmt(&esc(Localized::from((lng, T::TitleHome))), f)?;
         f.write_str("</h1>")?;
 
         f.write_str("<div class=\"now\"><p>")?;
-        if open_type.is_empty() {
-            fmt::Display::fmt(&esc(Localized::from((lng, T::Pause(open_dt)))), f)?;
-        } else {
+        if let Some(kind) = &view.now.kind {
             f.write_str("<strong>")?;
-            fmt::Display::fmt(&esc(Localized::from((lng, T::NowOpen(open_type)))), f)?;
+            fmt::Display::fmt(&esc(Localized::from((lng, T::NowOpen(kind)))), f)?;
             f.write_str("</strong></p><p>")?;
-            fmt::Display::fmt(&esc(Localized::from((lng, T::WindowUntil(open_dt)))), f)?;
-        }
-        f.write_str("</p></div>")?;
-
-        f.write_str("<p>")?;
-        if today_type.is_empty() {
             fmt::Display::fmt(
-                &esc(Localized::from((lng, T::TodayNone(self.0.timezone)))),
+                &esc(Localized::from((lng, T::WindowUntil(view.now.until)))),
                 f,
             )?;
         } else {
-            fmt::Display::fmt(
-                &esc(Localized::from((
-                    lng,
-                    T::TodayPickup(self.0.timezone, today_type, pickup),
-                ))),
-                f,
-            )?;
+            fmt::Display::fmt(&esc(Localized::from((lng, T::Pause(view.now.until)))), f)?;
         }
-        f.write_str(concat!("</p>", "<h2>"))?;
-        fmt::Display::fmt(&esc(Localized::from((lng, T::Week(now.date_naive())))), f)?;
+        f.write_str(concat!("</p></div>", "<h2>"))?;
+
+        fmt::Display::fmt(&esc(Localized::from((lng, T::Week(today)))), f)?;
         f.write_str(concat!("</h2>", "<table><tr><th>"))?;
         fmt::Display::fmt(&esc(Localized::from((lng, T::ColDay))), f)?;
         f.write_str("</th><th>")?;
@@ -391,26 +366,21 @@ impl<'a> LocalizedDisplay for HomeHtml<'a> {
         fmt::Display::fmt(&esc(Localized::from((lng, T::ColWindow))), f)?;
         f.write_str("</th></tr>")?;
         let dnames = days(lng);
-        let monday = now.date_naive() - Duration::days(day_index(now.weekday()) as i64);
         for i in 0..7 {
-            let d = monday + Duration::days(i);
-            let ty = self.0.type_for(d);
-            let wi = day_index(d.weekday());
-
             f.write_str("<tr><td>")?;
-            f.write_str(dnames[wi])?;
+            f.write_str(dnames[i])?;
             f.write_str("</td><td>")?;
-            if ty.is_empty() {
-                f.write_char('—')?;
+            if let Some(kind) = &view.week[i] {
+                fmt::Display::fmt(&esc(kind.as_str()), f)?;
             } else {
-                fmt::Display::fmt(&esc(ty), f)?;
+                f.write_char('—')?;
             }
             f.write_str("</td><td>")?;
-            f.write_str(dnames[(wi + 6) % 7])?;
+            f.write_str(dnames[(i + 6) % 7])?;
             f.write_char(' ')?;
             fmt::Display::fmt(&pickup.format("%H:%M"), f)?;
             f.write_str(" → ")?;
-            f.write_str(dnames[wi])?;
+            f.write_str(dnames[i])?;
             f.write_char(' ')?;
             fmt::Display::fmt(&pickup.format("%H:%M"), f)?;
             f.write_str("</td></tr>")?;
@@ -426,9 +396,82 @@ async fn home(req: HttpRequest, data: web::Data<AppState>) -> HttpResponse {
     };
     let lng = lang_of(&req, &st);
     let theme = theme_of(&req);
+    let view = home_view(&st, Utc::now());
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
-        .body(Localized::from((lng, Page(T::TitleHome, HomeHtml(&st), theme))).to_string())
+        .body(Localized::from((lng, Page(T::TitleHome, HomeHtml(&view), theme))).to_string())
+}
+
+struct NowWindow {
+    kind: Option<String>,
+    until: DateTime<Tz>,
+}
+
+impl Serialize for NowWindow {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut st = s.serialize_struct("NowWindow", 2)?;
+        st.serialize_field("kind", &self.kind)?;
+        st.serialize_field("until", &self.until.to_rfc3339())?;
+        st.end()
+    }
+}
+
+struct HomeView {
+    timezone: Tz,
+    pickup_time: NaiveTime,
+    now: NowWindow,
+    week: [Option<String>; 7],
+}
+
+impl Serialize for HomeView {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use std::io::Write;
+        let mut buf = [0u8; 5];
+        write!(&mut buf[..], "{}", self.pickup_time.format("%H:%M")).unwrap();
+        let mut st = s.serialize_struct("HomeView", 4)?;
+        st.serialize_field("timezone", &self.timezone)?;
+        st.serialize_field("pickup_time", std::str::from_utf8(&buf).unwrap())?;
+        st.serialize_field("now", &self.now)?;
+        st.serialize_field("week", &self.week)?;
+        st.end()
+    }
+}
+
+fn home_view(st: &State, now: DateTime<Utc>) -> HomeView {
+    let now = now.with_timezone(&st.timezone);
+    let pickup = st.pickup_time;
+    let today = now.date_naive();
+    let monday = today - Duration::days(day_index(now.weekday()) as i64);
+    let kind = |d: chrono::NaiveDate| {
+        let k = st.type_for(d);
+        (!k.is_empty()).then(|| k.to_string())
+    };
+    let (open_date, _wd, _open_type) = st.next_boundary(now);
+    let until = open_date
+        .and_time(pickup)
+        .and_local_timezone(st.timezone)
+        .earliest()
+        .expect("boundary locale non risolvibile");
+    HomeView {
+        timezone: st.timezone,
+        pickup_time: pickup,
+        now: NowWindow {
+            kind: kind(open_date),
+            until,
+        },
+        week: std::array::from_fn(|i| kind(monday + Duration::days(i as i64))),
+    }
+}
+
+async fn home_json_endpoint(_req: HttpRequest, data: web::Data<AppState>) -> HttpResponse {
+    let st = match load_or_500(&data) {
+        Ok(st) => st,
+        Err(resp) => return resp,
+    };
+    let json = serde_json::to_string(&home_view(&st, Utc::now())).unwrap();
+    HttpResponse::Ok()
+        .content_type("application/json; charset=utf-8")
+        .body(json)
 }
 
 fn admin_form_from_state(st: &State) -> AdminForm {
@@ -754,10 +797,8 @@ fn validate_and_save(db_path: &PathBuf, f: &AdminForm, lng: Lang) -> Result<(), 
             if !weeks.is_empty() {
                 if e.kind.trim().is_empty() {
                     let key = format!("{day}:{idx}");
-                    errs.fields.insert(
-                        key,
-                        Localized::from((lng, T::ErrType)).to_string(),
-                    );
+                    errs.fields
+                        .insert(key, Localized::from((lng, T::ErrType)).to_string());
                     continue;
                 }
                 for w in &weeks {
@@ -851,7 +892,11 @@ async fn admin_post(req: HttpRequest, data: web::Data<AppState>, body: web::Byte
             .body(
                 Localized::from((
                     lng,
-                    Page(T::TitleAdmin, AdminFormHtml(form, FormErrors::default()), theme),
+                    Page(
+                        T::TitleAdmin,
+                        AdminFormHtml(form, FormErrors::default()),
+                        theme,
+                    ),
                 ))
                 .to_string(),
             ),
@@ -861,11 +906,8 @@ async fn admin_post(req: HttpRequest, data: web::Data<AppState>, body: web::Byte
         Err((form, errs)) => HttpResponse::BadRequest()
             .content_type("text/html; charset=utf-8")
             .body(
-                Localized::from((
-                    lng,
-                    Page(T::TitleAdmin, AdminFormHtml(form, errs), theme),
-                ))
-                .to_string(),
+                Localized::from((lng, Page(T::TitleAdmin, AdminFormHtml(form, errs), theme)))
+                    .to_string(),
             ),
     }
 }
@@ -1034,6 +1076,7 @@ async fn serve(bind: String, db_path: PathBuf) -> std::io::Result<()> {
         App::new()
             .app_data(data.clone())
             .route("/", web::get().to(home))
+            .route("/home.json", web::get().to(home_json_endpoint))
             .route("/admin", web::get().to(admin_get))
             .route("/admin", web::post().to(admin_post))
             .route("/lang/{code}", web::get().to(switch_lang))
@@ -1119,6 +1162,14 @@ fn respond(status: StatusCode, html: String) -> http::Response<BoxBody<Bytes, st
         .status(status)
         .header("Content-Type", "text/html; charset=utf-8")
         .body(boxed_body(Bytes::from(html)))
+        .unwrap()
+}
+
+fn respond_json(json: String) -> http::Response<BoxBody<Bytes, std::io::Error>> {
+    http::Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json; charset=utf-8")
+        .body(boxed_body(Bytes::from(json)))
         .unwrap()
 }
 
@@ -1219,7 +1270,11 @@ fn route_cgi(
         .to_string();
         return respond(StatusCode::OK, html);
     }
-    let html = Localized::from((lng, Page(T::TitleHome, HomeHtml(st), theme))).to_string();
+    if path == "/home.json" || path.ends_with("/home.json") {
+        return respond_json(serde_json::to_string(&home_view(st, Utc::now())).unwrap());
+    }
+    let view = home_view(st, Utc::now());
+    let html = Localized::from((lng, Page(T::TitleHome, HomeHtml(&view), theme))).to_string();
     respond(StatusCode::OK, html)
 }
 
@@ -1419,6 +1474,45 @@ mod tests {
     }
 
     #[test]
+    fn home_view_serializes_now_and_week() {
+        let st = state();
+        // Monday 2024-01-01, week 1: paper collected, Tuesday organic, rest empty
+        let now = at("2024-01-01", "16:00", &st).with_timezone(&Utc);
+        let json = serde_json::to_value(home_view(&st, now)).unwrap();
+        assert_eq!(json["timezone"], "Europe/Rome");
+        assert_eq!(json["pickup_time"], "17:00");
+        assert_eq!(json["now"]["kind"], "Carta");
+        assert_eq!(json["now"]["until"], "2024-01-01T17:00:00+01:00");
+        assert!(json.get("today").is_none());
+        let week = json["week"].as_array().unwrap();
+        assert_eq!(week.len(), 7);
+        assert_eq!(week[0], "Carta");
+        assert_eq!(week[1], "Umido");
+        assert!(week[2..].iter().all(|v| v.is_null()));
+        // Wednesday 2024-01-03: pause until today's 17:00
+        let now = at("2024-01-03", "10:00", &st).with_timezone(&Utc);
+        let json = serde_json::to_value(home_view(&st, now)).unwrap();
+        assert!(json["now"]["kind"].is_null());
+        assert_eq!(json["now"]["until"], "2024-01-03T17:00:00+01:00");
+    }
+
+    #[test]
+    fn home_view_window_crosses_week_boundary() {
+        let st = state();
+        // Sunday evening 2023-12-31: open window is Monday 2024-01-01 paper,
+        // a day outside the serialized week (which ends Sunday)
+        let now = at("2023-12-31", "18:00", &st).with_timezone(&Utc);
+        let view = home_view(&st, now);
+        assert_eq!(view.now.kind.as_deref(), Some("Carta"));
+        assert_eq!(view.now.until, at("2024-01-01", "17:00", &st));
+        let week = serde_json::to_value(&view).unwrap()["week"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(week.iter().all(|v| v.is_null()));
+    }
+
+    #[test]
     fn window_open_before_pickup() {
         let st = state();
         // Mon 2024-01-01: paper window open since Sun 17:00
@@ -1525,12 +1619,16 @@ mod tests {
         assert!(errs.fields.contains_key("monday:1"));
         assert!(errs.bad_weeks.is_empty());
         // zero weeks but empty type: row ignored, no error
-        let f2 = AdminForm { entries: vec![Entry {
-            day: "monday".to_string(),
-            weeks: Vec::new(),
-            kind: String::new(),
-        }], ..f };
-        let path = std::env::temp_dir().join(format!("trashdiff_empty_type_{}", std::process::id()));
+        let f2 = AdminForm {
+            entries: vec![Entry {
+                day: "monday".to_string(),
+                weeks: Vec::new(),
+                kind: String::new(),
+            }],
+            ..f
+        };
+        let path =
+            std::env::temp_dir().join(format!("trashdiff_empty_type_{}", std::process::id()));
         assert!(validate_and_save(&path, &f2, Lang::It).is_ok());
         std::fs::remove_file(&path).ok();
     }
