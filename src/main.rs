@@ -573,6 +573,21 @@ struct AdminRow {
     kind: String,
 }
 
+#[derive(Deserialize)]
+struct WriteRow {
+    weeks: Week,
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+#[derive(Deserialize)]
+struct AdminWrite {
+    timezone: String,
+    pickup_time: String,
+    default_lang: Option<Lang>,
+    schedule: [Vec<WriteRow>; 7],
+}
+
 struct AdminJson {
     timezone: Tz,
     pickup_time: NaiveTime,
@@ -625,6 +640,105 @@ async fn admin_json_endpoint(_req: HttpRequest, data: web::Data<AppState>) -> Ht
         .body(json)
 }
 
+fn body_is_json(ct: Option<&str>, body: &[u8]) -> bool {
+    if ct
+        .map(|c| c.to_ascii_lowercase().contains("json"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    body.iter()
+        .find(|b| !b.is_ascii_whitespace())
+        .map(|b| *b == b'{')
+        .unwrap_or(false)
+}
+
+fn admin_write_form(w: AdminWrite) -> AdminForm {
+    let entries = w
+        .schedule
+        .iter()
+        .enumerate()
+        .flat_map(|(i, rows)| {
+            rows.iter().map(move |r| Entry {
+                day: DAY_KEYS[i].to_string(),
+                weeks: r.weeks,
+                kind: r.kind.clone(),
+            })
+        })
+        .collect();
+    AdminForm {
+        timezone: w.timezone,
+        pickup_time: w.pickup_time,
+        entries,
+        action: String::new(),
+        default_lang: w.default_lang.map(|l| l.to_string()).unwrap_or_default(),
+    }
+}
+
+#[derive(Serialize)]
+struct WriteErrors {
+    fields: HashMap<String, String>,
+    overlaps: HashMap<String, Vec<u8>>,
+}
+
+impl From<FormErrors> for WriteErrors {
+    fn from(errs: FormErrors) -> Self {
+        let overlaps = errs
+            .bad_weeks
+            .iter()
+            .map(|((day, idx), w)| {
+                let weeks = (1..=5)
+                    .filter(|n| w.contains(week_of(*n)))
+                    .map(|n| n as u8)
+                    .collect();
+                (format!("{day}:{idx}"), weeks)
+            })
+            .collect();
+        WriteErrors {
+            fields: errs.fields,
+            overlaps,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum JsonWrite {
+    ParseErr(String),
+    Saved,
+    Invalid(FormErrors),
+}
+
+fn admin_json_write(db_path: &PathBuf, body: &[u8], lng: Lang) -> JsonWrite {
+    let w: AdminWrite = match serde_json::from_slice(body) {
+        Ok(w) => w,
+        Err(e) => return JsonWrite::ParseErr(format!("JSON non valido: {e}")),
+    };
+    match process_admin(admin_write_form(w), db_path, lng) {
+        Ok(None) => JsonWrite::Saved,
+        Ok(Some(_)) => unreachable!("action vuota non produce righe"),
+        Err((_f, errs)) => JsonWrite::Invalid(errs),
+    }
+}
+
+fn admin_post_json(db_path: &PathBuf, lng: Lang, body: &[u8]) -> HttpResponse {
+    match admin_json_write(db_path, body, lng) {
+        JsonWrite::ParseErr(msg) => HttpResponse::BadRequest()
+            .content_type("application/json; charset=utf-8")
+            .body(serde_json::json!({ "error": msg }).to_string()),
+        JsonWrite::Saved => match State::load(db_path.clone()) {
+            Ok(fresh) => HttpResponse::Ok()
+                .content_type("application/json; charset=utf-8")
+                .body(serde_json::to_string(&admin_json(&fresh)).unwrap()),
+            Err(e) => HttpResponse::InternalServerError()
+                .content_type("text/plain; charset=utf-8")
+                .body(e),
+        },
+        JsonWrite::Invalid(errs) => HttpResponse::BadRequest()
+            .content_type("application/json; charset=utf-8")
+            .body(serde_json::to_string(&WriteErrors::from(errs)).unwrap()),
+    }
+}
+
 fn admin_form_from_state(st: &State) -> AdminForm {
     AdminForm {
         timezone: st.timezone.to_string(),
@@ -665,7 +779,7 @@ struct AdminForm {
     default_lang: String,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct FormErrors {
     fields: HashMap<String, String>,
     bad_weeks: HashMap<(&'static str, usize), Week>,
@@ -1033,6 +1147,13 @@ async fn admin_post(req: HttpRequest, data: web::Data<AppState>, body: web::Byte
     };
     let lng = lang_of(&req, &st);
     let theme = theme_of(&req);
+    let ct = req
+        .headers()
+        .get(actix_web::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok());
+    if body_is_json(ct, &body) {
+        return admin_post_json(&data.0, lng, &body);
+    }
     let f = form_from_body(&body);
     match process_admin(f, &data.0, lng) {
         Ok(Some(form)) => HttpResponse::Ok()
@@ -1318,12 +1439,19 @@ fn respond(status: StatusCode, html: String) -> http::Response<BoxBody<Bytes, st
         .unwrap()
 }
 
-fn respond_json(json: String) -> http::Response<BoxBody<Bytes, std::io::Error>> {
+fn respond_json_status(
+    status: StatusCode,
+    json: String,
+) -> http::Response<BoxBody<Bytes, std::io::Error>> {
     http::Response::builder()
-        .status(StatusCode::OK)
+        .status(status)
         .header("Content-Type", "application/json; charset=utf-8")
         .body(boxed_body(Bytes::from(json)))
         .unwrap()
+}
+
+fn respond_json(json: String) -> http::Response<BoxBody<Bytes, std::io::Error>> {
+    respond_json_status(StatusCode::OK, json)
 }
 
 fn redirect(
@@ -1387,6 +1515,30 @@ fn route_cgi(
     }
     if path == "/admin" || path.ends_with("/admin") {
         if *method == Method::POST {
+            let ct = headers
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok());
+            if body_is_json(ct, &body) {
+                return match admin_json_write(&st.db_path, &body, lng) {
+                    JsonWrite::ParseErr(msg) => respond_json_status(
+                        StatusCode::BAD_REQUEST,
+                        serde_json::json!({ "error": msg }).to_string(),
+                    ),
+                    JsonWrite::Saved => match State::load(st.db_path.clone()) {
+                        Ok(fresh) => {
+                            respond_json(serde_json::to_string(&admin_json(&fresh)).unwrap())
+                        }
+                        Err(e) => respond_json_status(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            serde_json::json!({ "error": e }).to_string(),
+                        ),
+                    },
+                    JsonWrite::Invalid(errs) => respond_json_status(
+                        StatusCode::BAD_REQUEST,
+                        serde_json::to_string(&WriteErrors::from(errs)).unwrap(),
+                    ),
+                };
+            }
             let f = form_from_body(&body);
             return match process_admin(f, &st.db_path, lng) {
                 Ok(Some(form)) => {
@@ -1594,6 +1746,10 @@ mod tests {
     }
 
     fn state() -> State {
+        state_with_db(PathBuf::from("/nonexistent"))
+    }
+
+    fn state_with_db(db_path: PathBuf) -> State {
         let schedule = vec![
             Entry {
                 day: "monday".to_string(),
@@ -1607,7 +1763,7 @@ mod tests {
             },
         ];
         State {
-            db_path: PathBuf::from("/nonexistent"),
+            db_path,
             timezone: "Europe/Rome".parse().unwrap(),
             pickup_time: NaiveTime::parse_from_str("17:00", "%H:%M").unwrap(),
             schedule,
@@ -2118,5 +2274,108 @@ mod tests {
         assert!(response.contains("Status: 400"));
         assert!(response.contains("invalid timezone"));
         handle.await.unwrap();
+    }
+
+    async fn run_scgi_post(st: State, body: &[u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let st = Arc::new(st);
+        let handle = tokio::spawn(async move {
+            cegla_scgi::server::server_handle_scgi(server_io, move |request| {
+                let st = Arc::clone(&st);
+                async move { scgi_handler(&st, request).await }
+            })
+            .await
+            .unwrap();
+        });
+        let (mut reader, mut writer) = tokio::io::split(client_io);
+        let netstring = scgi_netstring(
+            &[
+                ("REQUEST_METHOD", "POST"),
+                ("REQUEST_URI", "/admin"),
+                ("CONTENT_LENGTH", &body.len().to_string()),
+            ],
+            body,
+        );
+        writer.write_all(&netstring).await.unwrap();
+        drop(writer);
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
+        handle.await.unwrap();
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    fn temp_db() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "trashdiff_json_{}_{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    #[test]
+    fn admin_write_full_replace_roundtrips() {
+        let db = temp_db();
+        let body = br#"{"timezone":"Europe/Rome","pickup_time":"08:00","default_lang":null,"schedule":[[{"weeks":[1,3],"type":"Carta"}],[],[],[],[],[],[]]}"#;
+        match admin_json_write(&db, body, Lang::En) {
+            JsonWrite::Saved => {}
+            other => panic!("atteso Saved, ottenuto {other:?}"),
+        }
+        let raw = std::fs::read_to_string(&db).unwrap();
+        assert!(raw.contains("pickup_time = \"08:00\""), "raw:\n{raw}");
+        assert!(raw.contains("type = \"Carta\""));
+        assert!(raw.contains("\n    1,"));
+        assert!(raw.contains("\n    3,"));
+        assert!(!raw.contains("tuesday"));
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn admin_write_rejects_overlap() {
+        let db = PathBuf::from("/nonexistent");
+        let body = br#"{"timezone":"Europe/Rome","pickup_time":"08:00","schedule":[[{"weeks":[1],"type":"Carta"},{"weeks":[1],"type":"Umido"}],[],[],[],[],[],[]]}"#;
+        match admin_json_write(&db, body, Lang::En) {
+            JsonWrite::Invalid(errs) => {
+                let w: WriteErrors = errs.into();
+                assert!(w.fields.contains_key("monday:1"));
+                assert_eq!(w.overlaps["monday:1"], vec![1]);
+            }
+            other => panic!("atteso Invalid, ottenuto {other:?}"),
+        }
+    }
+
+    #[test]
+    fn body_is_json_detects_ct_and_brace() {
+        assert!(body_is_json(Some("application/json"), b"x"));
+        assert!(body_is_json(None, b"  {\"a\":1}"));
+        assert!(!body_is_json(None, b"pickup_time=17:00"));
+        assert!(!body_is_json(Some("text/plain"), b"pickup_time=17:00"));
+    }
+
+    #[tokio::test]
+    async fn scgi_roundtrip_post_admin_json_saves() {
+        let db = temp_db();
+        let body = br#"{"timezone":"Europe/Rome","pickup_time":"08:00","schedule":[[{"weeks":[1],"type":"Carta"}],[],[],[],[],[],[]]}"#;
+        let response = run_scgi_post(state_with_db(db.clone()), body).await;
+        assert!(response.contains("Status: 200"));
+        assert!(response.contains("application/json"));
+        assert!(response.contains("\"type\":\"Carta\""));
+        assert!(response.contains("\"timezone\":\"Europe/Rome\""));
+        let raw = std::fs::read_to_string(&db).unwrap();
+        assert!(raw.contains("pickup_time = \"08:00\""));
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[tokio::test]
+    async fn scgi_roundtrip_post_admin_json_rejects_bad_body() {
+        let response = run_scgi_post(state(), br#"{"timezone":5}"#).await;
+        assert!(response.contains("Status: 400"));
+        assert!(response.contains("error"));
+        assert!(response.contains("JSON non valido"));
     }
 }

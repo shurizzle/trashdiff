@@ -101,6 +101,13 @@ trashdiff cli
   `pickup_time`, `default_lang` (`null` = auto → English) and `schedule`, an
   array of 7 arrays (Monday..Sunday), each holding that weekday's rows
   `{ "weeks": [...], "type": "..." }` in the order shown on the page
+- `POST /admin` — full-replace write API: send the `admin.json` shape with
+  `Content-Type: application/json` (a body starting with `{` is also
+  detected). Validated like the backoffice save (type required for the ticked
+  weeks, no overlapping `(day, week)` pairs, empty `weeks` rows dropped); on
+  success returns `200` with the refreshed `admin.json`, invalid input gives
+  `400` (`{"error": ...}` for parse failures, `{fields, overlaps}` for
+  validation errors). Form posts are unchanged
 - `/admin` — backoffice: one row per pickup under each weekday (weekdays are
   fixed and always shown). Tick weeks 1-5 and type the waste type; `+`
   duplicates that weekday, `-` removes the row, no JS needed. Plus global
