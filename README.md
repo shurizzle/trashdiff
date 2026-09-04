@@ -97,6 +97,10 @@ trashdiff cli
   `now` (`kind` = waste type currently out, `null` = pause, with `until` =
   when it ends) and `week` as waste-type strings (or `null` when nothing is
   collected); `week` is the current week, 7 entries Monday..Sunday
+- `/admin.json` — backoffice configuration as JSON: `timezone`,
+  `pickup_time`, `default_lang` (`null` = auto → English) and `schedule`, an
+  array of 7 arrays (Monday..Sunday), each holding that weekday's rows
+  `{ "weeks": [...], "type": "..." }` in the order shown on the page
 - `/admin` — backoffice: one row per pickup under each weekday (weekdays are
   fixed and always shown). Tick weeks 1-5 and type the waste type; `+`
   duplicates that weekday, `-` removes the row, no JS needed. Plus global

@@ -425,16 +425,20 @@ struct HomeView {
 
 impl Serialize for HomeView {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        use std::io::Write;
         let mut buf = [0u8; 5];
-        write!(&mut buf[..], "{}", self.pickup_time.format("%H:%M")).unwrap();
         let mut st = s.serialize_struct("HomeView", 4)?;
         st.serialize_field("timezone", &self.timezone)?;
-        st.serialize_field("pickup_time", std::str::from_utf8(&buf).unwrap())?;
+        st.serialize_field("pickup_time", hhmm(&self.pickup_time, &mut buf))?;
         st.serialize_field("now", &self.now)?;
         st.serialize_field("week", &self.week)?;
         st.end()
     }
+}
+
+fn hhmm<'a>(t: &NaiveTime, buf: &'a mut [u8; 5]) -> &'a str {
+    use std::io::Write;
+    write!(&mut buf[..], "{}", t.format("%H:%M")).unwrap();
+    std::str::from_utf8(buf).unwrap()
 }
 
 fn home_view(st: &State, now: DateTime<Utc>) -> HomeView {
@@ -469,6 +473,65 @@ async fn home_json_endpoint(_req: HttpRequest, data: web::Data<AppState>) -> Htt
         Err(resp) => return resp,
     };
     let json = serde_json::to_string(&home_view(&st, Utc::now())).unwrap();
+    HttpResponse::Ok()
+        .content_type("application/json; charset=utf-8")
+        .body(json)
+}
+
+#[derive(Serialize)]
+struct AdminRow {
+    weeks: Vec<u32>,
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+struct AdminJson {
+    timezone: Tz,
+    pickup_time: NaiveTime,
+    default_lang: Option<Lang>,
+    schedule: [Vec<AdminRow>; 7],
+}
+
+impl Serialize for AdminJson {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut buf = [0u8; 5];
+        let mut st = s.serialize_struct("AdminJson", 4)?;
+        st.serialize_field("timezone", &self.timezone)?;
+        st.serialize_field("pickup_time", hhmm(&self.pickup_time, &mut buf))?;
+        st.serialize_field("default_lang", &self.default_lang)?;
+        st.serialize_field("schedule", &self.schedule)?;
+        st.end()
+    }
+}
+
+fn admin_json(st: &State) -> AdminJson {
+    let rows_for = |day: &str| {
+        let mut rows: Vec<AdminRow> = st
+            .schedule
+            .iter()
+            .filter(|e| e.day == day)
+            .map(|e| AdminRow {
+                weeks: e.weeks.clone(),
+                kind: e.kind.clone(),
+            })
+            .collect();
+        rows.sort_by_key(|r| r.weeks.iter().copied().min().unwrap_or(0));
+        rows
+    };
+    AdminJson {
+        timezone: st.timezone,
+        pickup_time: st.pickup_time,
+        default_lang: st.default_lang,
+        schedule: std::array::from_fn(|i| rows_for(DAY_KEYS[i])),
+    }
+}
+
+async fn admin_json_endpoint(_req: HttpRequest, data: web::Data<AppState>) -> HttpResponse {
+    let st = match load_or_500(&data) {
+        Ok(st) => st,
+        Err(resp) => return resp,
+    };
+    let json = serde_json::to_string(&admin_json(&st)).unwrap();
     HttpResponse::Ok()
         .content_type("application/json; charset=utf-8")
         .body(json)
@@ -1079,6 +1142,7 @@ async fn serve(bind: String, db_path: PathBuf) -> std::io::Result<()> {
             .route("/home.json", web::get().to(home_json_endpoint))
             .route("/admin", web::get().to(admin_get))
             .route("/admin", web::post().to(admin_post))
+            .route("/admin.json", web::get().to(admin_json_endpoint))
             .route("/lang/{code}", web::get().to(switch_lang))
             .route("/theme/{code}", web::get().to(switch_theme))
     })
@@ -1272,6 +1336,9 @@ fn route_cgi(
     }
     if path == "/home.json" || path.ends_with("/home.json") {
         return respond_json(serde_json::to_string(&home_view(st, Utc::now())).unwrap());
+    }
+    if path == "/admin.json" || path.ends_with("/admin.json") {
+        return respond_json(serde_json::to_string(&admin_json(st)).unwrap());
     }
     let view = home_view(st, Utc::now());
     let html = Localized::from((lng, Page(T::TitleHome, HomeHtml(&view), theme))).to_string();
@@ -1510,6 +1577,33 @@ mod tests {
             .unwrap()
             .clone();
         assert!(week.iter().all(|v| v.is_null()));
+    }
+
+    #[test]
+    fn admin_json_groups_rows_by_weekday() {
+        let mut st = state();
+        st.schedule.push(Entry {
+            day: "monday".to_string(),
+            weeks: vec![2],
+            kind: "Plastica".to_string(),
+        });
+        st.default_lang = Some(Lang::En);
+        let json = serde_json::to_value(admin_json(&st)).unwrap();
+        assert_eq!(json["timezone"], "Europe/Rome");
+        assert_eq!(json["pickup_time"], "17:00");
+        assert_eq!(json["default_lang"], "en");
+        let schedule = json["schedule"].as_array().unwrap();
+        assert_eq!(schedule.len(), 7);
+        let monday = schedule[0].as_array().unwrap();
+        assert_eq!(monday.len(), 2);
+        assert_eq!(monday[0]["weeks"], serde_json::json!([1]));
+        assert_eq!(monday[0]["type"], "Carta");
+        assert_eq!(monday[1]["weeks"], serde_json::json!([2]));
+        assert_eq!(monday[1]["type"], "Plastica");
+        let tuesday = schedule[1].as_array().unwrap();
+        assert_eq!(tuesday.len(), 1);
+        assert_eq!(tuesday[0]["type"], "Umido");
+        assert!(schedule[2..].iter().all(|d| d.as_array().unwrap().is_empty()));
     }
 
     #[test]
