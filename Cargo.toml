@@ -5,13 +5,20 @@ edition = "2024"
 license = "MIT"
 description = "Weekly waste collection schedule with http/cgi/fcgi/scgi frontends"
 
+[features]
+default = ["http", "cgi", "fcgi", "scgi"]
+http = ["dep:actix-web"]
+cgi = ["dep:cegla-cgi", "dep:tokio"]
+fcgi = ["dep:cegla-fcgi", "dep:tokio"]
+scgi = ["dep:cegla-scgi", "dep:tokio"]
+
 [dependencies]
-actix-web = "4"
+actix-web = { version = "4", optional = true }
 bitflags = "2.13.1"
 bytes = "1"
-cegla-cgi = { version = "0.2.3", features = ["server"] }
-cegla-fcgi = { version = "0.2.3", features = ["server"] }
-cegla-scgi = { version = "0.2.3", features = ["server"] }
+cegla-cgi = { version = "0.2.3", features = ["server"], optional = true }
+cegla-fcgi = { version = "0.2.3", features = ["server"], optional = true }
+cegla-scgi = { version = "0.2.3", features = ["server"], optional = true }
 chrono = "0.4"
 chrono-tz = { version = "0.10", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
@@ -20,7 +27,7 @@ http = "1"
 http-body-util = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-std", "io-util", "net", "macros"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-std", "io-util", "net", "macros"], optional = true }
 toml = "1.1"
 
 [build-dependencies]

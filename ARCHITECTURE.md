@@ -77,9 +77,9 @@ the bottom of `main.rs`, and `i18n.rs` has its own.
 
 | Crate | Use |
 |---|---|
-| `actix-web` | Built-in HTTP server + routing (`web::serve`) |
-| `cegla-cgi` / `cegla-fcgi` / `cegla-scgi` (`server` feature) | CGI-family wire protocols; app supplies a body-generic handler |
-| `tokio` (`rt`, `net`, `io-std`, `io-util`) | Runtime + sockets for CGI/FCGI/SCGI and CLI |
+| `actix-web` (optional, `http` feature) | Built-in HTTP server + routing (`web::serve`) |
+| `cegla-cgi` / `cegla-fcgi` / `cegla-scgi` (`server` feature; optional, one per CGI feature) | CGI-family wire protocols; app supplies a body-generic handler |
+| `tokio` (`rt`, `net`, `io-std`, `io-util`; optional) | Runtime + sockets for CGI/FCGI/SCGI |
 | `bitflags` | `Week` 1..5 bitmask |
 | `chrono` / `chrono-tz` | Time/date math; `Tz` IANA resolve + `TZ_VARIANTS` for the timezone `<select>` |
 | `clap` (`derive`, `env`) | Subcommands + `TRASHDIFF_DB` env |
@@ -99,3 +99,13 @@ the bottom of `main.rs`, and `i18n.rs` has its own.
 | `cli` | `transport::cli_cmd` | prints what can be thrown now | tokio |
 
 `--db` defaults to `trashdb.toml` (env `TRASHDIFF_DB`; explicit flag wins).
+
+### Build features
+
+Each frontend sits behind a Cargo feature, all enabled by default: `http`,
+`cgi`, `fcgi`, `scgi`. The `cli` subcommand is always built. Turning a feature
+off removes its subcommand and its dependencies (`actix-web` for `http`,
+`cegla-cgi`/`cegla-fcgi`/`cegla-scgi` + `tokio` for the CGI family), e.g.
+`cargo build --no-default-features --features fcgi`. The transport code in
+`transport.rs` and the `web` module are `#[cfg]`-gated accordingly; only the
+`PathBuf`-loading `cli_cmd` and shared domain logic stay unconditional.

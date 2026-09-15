@@ -19,6 +19,17 @@ be put out from the preceding Sunday 17:00 to Monday 17:00.
 cargo build --release
 ```
 
+Each frontend is behind a Cargo feature (all enabled by default): `http`,
+`cgi`, `fcgi`, `scgi`. The `cli` subcommand and the domain logic are always
+built. Build only what you deploy:
+
+```sh
+cargo build --release --no-default-features --features scgi
+```
+
+`actix-web` (`http`) and the `cegla-*` crates (`cgi`/`fcgi`/`scgi`) are only
+pulled in by their feature.
+
 ## Usage
 
 ```

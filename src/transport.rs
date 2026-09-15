@@ -1,20 +1,29 @@
 use std::path::PathBuf;
 
-use bytes::Bytes;
 use chrono::Utc;
+
+use crate::i18n::{Lang, Localized, T};
+use crate::schedule::State;
+
+#[cfg(any(feature = "cgi", feature = "fcgi", feature = "scgi"))]
+use bytes::Bytes;
+#[cfg(any(feature = "cgi", feature = "fcgi", feature = "scgi"))]
 use http::{Method, StatusCode};
+#[cfg(any(feature = "cgi", feature = "fcgi", feature = "scgi"))]
 use http_body_util::combinators::BoxBody;
+#[cfg(any(feature = "cgi", feature = "fcgi", feature = "scgi"))]
 use http_body_util::{BodyExt, Full};
 
+#[cfg(any(feature = "cgi", feature = "fcgi", feature = "scgi"))]
 use crate::admin::{
     JsonWrite, WriteErrors, admin_json_write, body_is_json, form_from_body, process_admin,
 };
-use crate::i18n::{Lang, Localized, T};
-use crate::schedule::State;
+#[cfg(any(feature = "cgi", feature = "fcgi", feature = "scgi"))]
 use crate::views::{
     AdminFormHtml, FormErrors, HomeHtml, Page, Theme, admin_form_from_state, admin_json, home_view,
 };
 
+#[cfg(any(feature = "cgi", feature = "fcgi", feature = "scgi"))]
 pub fn lang_from_headers(h: &http::HeaderMap, st: &State) -> Lang {
     let cookie = h.get(http::header::COOKIE).and_then(|v| v.to_str().ok());
     let al = h
@@ -23,17 +32,20 @@ pub fn lang_from_headers(h: &http::HeaderMap, st: &State) -> Lang {
     Lang::from_req(cookie, al, st.default_lang.unwrap_or(Lang::En))
 }
 
+#[cfg(any(feature = "cgi", feature = "fcgi", feature = "scgi"))]
 pub fn theme_from_headers(h: &http::HeaderMap) -> Theme {
     let cookie = h.get(http::header::COOKIE).and_then(|v| v.to_str().ok());
     Theme::from_req(cookie)
 }
 
+#[cfg(any(feature = "cgi", feature = "fcgi", feature = "scgi"))]
 fn boxed_body(b: Bytes) -> BoxBody<Bytes, std::io::Error> {
     Full::new(b)
         .map_err(|_| std::io::Error::other("body error"))
         .boxed()
 }
 
+#[cfg(any(feature = "cgi", feature = "fcgi", feature = "scgi"))]
 fn respond(status: StatusCode, html: String) -> http::Response<BoxBody<Bytes, std::io::Error>> {
     http::Response::builder()
         .status(status)
@@ -42,6 +54,7 @@ fn respond(status: StatusCode, html: String) -> http::Response<BoxBody<Bytes, st
         .unwrap()
 }
 
+#[cfg(any(feature = "cgi", feature = "fcgi", feature = "scgi"))]
 fn respond_json_status(
     status: StatusCode,
     json: String,
@@ -53,10 +66,12 @@ fn respond_json_status(
         .unwrap()
 }
 
+#[cfg(any(feature = "cgi", feature = "fcgi", feature = "scgi"))]
 fn respond_json(json: String) -> http::Response<BoxBody<Bytes, std::io::Error>> {
     respond_json_status(StatusCode::OK, json)
 }
 
+#[cfg(any(feature = "cgi", feature = "fcgi", feature = "scgi"))]
 fn redirect(
     location: &str,
     cookie: Option<&str>,
@@ -70,6 +85,7 @@ fn redirect(
     b.body(boxed_body(Bytes::new())).unwrap()
 }
 
+#[cfg(any(feature = "cgi", feature = "fcgi", feature = "scgi"))]
 pub fn route_cgi(
     st: &State,
     lng: Lang,
@@ -189,6 +205,7 @@ pub fn route_cgi(
     respond(StatusCode::OK, html)
 }
 
+#[cfg(feature = "cgi")]
 pub async fn cgi_run(db: PathBuf) -> std::io::Result<()> {
     let st = State::load(db).map_err(std::io::Error::other)?;
     let has_body = std::env::var("CONTENT_LENGTH")
@@ -232,8 +249,10 @@ pub async fn cgi_run(db: PathBuf) -> std::io::Result<()> {
     .await
 }
 
+#[cfg(feature = "fcgi")]
 pub struct TokioRt;
 
+#[cfg(feature = "fcgi")]
 impl cegla_fcgi::server::Runtime for TokioRt {
     fn spawn(&self, future: impl std::future::Future + Send + 'static) {
         tokio::spawn(async move {
@@ -242,6 +261,7 @@ impl cegla_fcgi::server::Runtime for TokioRt {
     }
 }
 
+#[cfg(any(feature = "fcgi", feature = "scgi"))]
 pub async fn read_body_capped<B>(mut body: B, content_length: usize) -> Result<Bytes, std::io::Error>
 where
     B: BodyExt + Unpin,
@@ -270,6 +290,7 @@ where
     Ok(Bytes::from(buf))
 }
 
+#[cfg(feature = "fcgi")]
 pub async fn fcgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     println!("trashdiff fcgi listening on {bind}");
@@ -305,6 +326,7 @@ pub async fn fcgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
     }
 }
 
+#[cfg(feature = "scgi")]
 pub async fn scgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     println!("trashdiff scgi listening on {bind}");

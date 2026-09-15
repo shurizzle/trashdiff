@@ -7,9 +7,17 @@ mod i18n;
 mod schedule;
 mod transport;
 mod views;
+#[cfg(feature = "http")]
 mod web;
 
-use crate::transport::{cgi_run, cli_cmd, fcgi_run, scgi_run};
+#[cfg(feature = "cgi")]
+use crate::transport::cgi_run;
+use crate::transport::cli_cmd;
+#[cfg(feature = "fcgi")]
+use crate::transport::fcgi_run;
+#[cfg(feature = "scgi")]
+use crate::transport::scgi_run;
+#[cfg(feature = "http")]
 use crate::web::serve;
 
 #[derive(Parser)]
@@ -26,6 +34,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run the HTTP server
+    #[cfg(feature = "http")]
     Http {
         /// Bind address (host:port)
         #[arg(long, default_value = "127.0.0.1:8080")]
@@ -41,12 +50,14 @@ enum Command {
         db: PathBuf,
     },
     /// Serve a single request over CGI (e.g. from Apache/nginx)
+    #[cfg(feature = "cgi")]
     Cgi {
         /// Path to database file
         #[arg(long, default_value = "trashdb.toml", env = "TRASHDIFF_DB")]
         db: PathBuf,
     },
     /// Run a FastCGI server (e.g. nginx fastcgi_pass)
+    #[cfg(feature = "fcgi")]
     Fcgi {
         /// Bind address (host:port)
         #[arg(long, default_value = "127.0.0.1:9000")]
@@ -56,6 +67,7 @@ enum Command {
         db: PathBuf,
     },
     /// Run an SCGI server (e.g. nginx mod_scgi)
+    #[cfg(feature = "scgi")]
     Scgi {
         /// Bind address (host:port)
         #[arg(long, default_value = "127.0.0.1:4000")]
@@ -67,18 +79,21 @@ enum Command {
 }
 
 fn main() -> std::io::Result<()> {
-    let argv: Vec<String> = std::env::args().collect();
-    let no_real_args = argv.iter().skip(1).all(|a| a.trim().is_empty());
-    if no_real_args
-        && std::env::var("GATEWAY_INTERFACE")
-            .map(|g| g.starts_with("CGI/"))
-            .unwrap_or(false)
+    #[cfg(feature = "cgi")]
     {
-        let db = std::env::var("TRASHDIFF_DB")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("trashdb.toml"));
-        let rt = tokio::runtime::Runtime::new()?;
-        return rt.block_on(cgi_run(db));
+        let argv: Vec<String> = std::env::args().collect();
+        let no_real_args = argv.iter().skip(1).all(|a| a.trim().is_empty());
+        if no_real_args
+            && std::env::var("GATEWAY_INTERFACE")
+                .map(|g| g.starts_with("CGI/"))
+                .unwrap_or(false)
+        {
+            let db = std::env::var("TRASHDIFF_DB")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("trashdb.toml"));
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(cgi_run(db));
+        }
     }
     let cli = Cli::parse();
     match cli.command {
@@ -89,18 +104,22 @@ fn main() -> std::io::Result<()> {
                 std::process::exit(1);
             }
         },
+        #[cfg(feature = "http")]
         Command::Http { bind, db } => {
             let rt = actix_web::rt::Runtime::new()?;
             rt.block_on(serve(bind, db))
         }
+        #[cfg(feature = "cgi")]
         Command::Cgi { db } => {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(cgi_run(db))
         }
+        #[cfg(feature = "fcgi")]
         Command::Fcgi { bind, db } => {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(fcgi_run(bind, db))
         }
+        #[cfg(feature = "scgi")]
         Command::Scgi { bind, db } => {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(scgi_run(bind, db))
@@ -117,12 +136,16 @@ mod tests {
     use crate::views::*;
 
     use std::path::PathBuf;
+    #[cfg(any(feature = "fcgi", feature = "scgi"))]
     use std::sync::Arc;
 
+    #[cfg(any(feature = "fcgi", feature = "scgi"))]
     use bytes::Bytes;
     use chrono::{DateTime, NaiveTime, Utc, Weekday};
     use chrono_tz::Tz;
+    #[cfg(feature = "scgi")]
     use http_body_util::BodyExt;
+    #[cfg(any(feature = "fcgi", feature = "scgi"))]
     use http_body_util::combinators::BoxBody;
 
     fn w(ws: &[u32]) -> Week {
@@ -383,15 +406,19 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    #[cfg(feature = "fcgi")]
     use cegla_fcgi::protocol::{
         codec::{Decoder, Encoder},
         constants::{RecordType, Role},
         name_value_pair::NameValuePair,
         record::Record,
     };
+    #[cfg(feature = "fcgi")]
     use futures_util::{SinkExt, StreamExt};
+    #[cfg(feature = "fcgi")]
     use tokio_util::codec::{FramedRead, FramedWrite};
 
+    #[cfg(feature = "fcgi")]
     #[tokio::test]
     async fn fcgi_roundtrip_serves_home() {
         let (client_io, server_io) = tokio::io::duplex(1024);
@@ -474,6 +501,7 @@ mod tests {
         handle.await.unwrap();
     }
 
+    #[cfg(feature = "fcgi")]
     #[tokio::test]
     async fn fcgi_roundtrip_post_admin_validation() {
         let (client_io, server_io) = tokio::io::duplex(1024);
@@ -562,6 +590,7 @@ mod tests {
         handle.await.unwrap();
     }
 
+    #[cfg(feature = "scgi")]
     fn scgi_netstring(pairs: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
         let mut env = Vec::new();
         for (k, v) in pairs {
@@ -579,6 +608,7 @@ mod tests {
         out
     }
 
+    #[cfg(feature = "scgi")]
     async fn scgi_handler<B>(
         st: &State,
         request: http::Request<B>,
@@ -602,6 +632,7 @@ mod tests {
         Ok(route_cgi(st, lng, theme, &method, &path, &headers, body))
     }
 
+    #[cfg(feature = "scgi")]
     #[tokio::test]
     async fn scgi_roundtrip_serves_home() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -627,6 +658,7 @@ mod tests {
         handle.await.unwrap();
     }
 
+    #[cfg(feature = "scgi")]
     #[tokio::test]
     async fn scgi_roundtrip_post_admin_validation() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -660,6 +692,7 @@ mod tests {
         handle.await.unwrap();
     }
 
+    #[cfg(feature = "scgi")]
     async fn run_scgi_post(st: State, body: &[u8]) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let (client_io, server_io) = tokio::io::duplex(4096);
@@ -741,6 +774,7 @@ mod tests {
         assert!(!body_is_json(Some("text/plain"), b"pickup_time=17:00"));
     }
 
+    #[cfg(feature = "scgi")]
     #[tokio::test]
     async fn scgi_roundtrip_post_admin_json_saves() {
         let db = temp_db();
@@ -755,6 +789,7 @@ mod tests {
         let _ = std::fs::remove_file(&db);
     }
 
+    #[cfg(feature = "scgi")]
     #[tokio::test]
     async fn scgi_roundtrip_post_admin_json_rejects_bad_body() {
         let response = run_scgi_post(state(), br#"{"timezone":5}"#).await;
