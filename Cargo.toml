@@ -32,12 +32,12 @@ toml = "1.1"
 
 [build-dependencies]
 lightningcss = { version = "1.0.0-alpha.72", default-features = false }
-oxc_allocator = "0.148"
-oxc_codegen = "0.148"
-oxc_mangler = "0.148"
-oxc_minifier = "0.148"
-oxc_parser = "0.148"
-oxc_span = "0.148"
+oxc_allocator = "0.150"
+oxc_codegen = "0.150"
+oxc_mangler = "0.150"
+oxc_minifier = "0.150"
+oxc_parser = "0.150"
+oxc_span = "0.150"
 
 [dev-dependencies]
 futures-util = "0.3"
