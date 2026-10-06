@@ -33,10 +33,10 @@ the bottom of `main.rs`, and `i18n.rs` has its own.
 ## 2. Key types and relationships
 
 **Config / disk layer** (`schedule.rs`):
-- `Db` — serde TOML struct: `timezone`, `pickup_time`, `schedule: Vec<Entry>`, optional `default_lang`, optional `custom_js`, optional `custom_css`.
-- `Entry` — one schedule line: `day: String`, `weeks: Week`, `kind: String` (`#[serde(rename="type")]`).
-- `DbOld` — legacy format `schedule: HashMap<String,String>` (day→type); auto-migrated by `migrate_old`.
-- `State` — parsed, in-memory runtime form (not serde): `db_path`, `timezone: Tz`, `pickup_time: NaiveTime`, `schedule`, `default_lang`, `custom_js`, `custom_css`. Rebuilt per request via `State::load`.
+- `Db` — serde TOML struct: `timezone`, `pickup_time`, `schedule: Vec<Entry>`, optional `default_lang`, optional `custom_js: Option<Arc<str>>`, optional `custom_css: Option<Arc<str>>`.
+- `Entry` — one schedule line: `day: String`, `weeks: Week`, `kind: Arc<str>` (`#[serde(rename="type")]`).
+- `DbOld` — legacy format `schedule: HashMap<String, Arc<str>>` (day→type); auto-migrated by `migrate_old`.
+- `State` — parsed, in-memory runtime form (not serde): `db_path`, `timezone: Tz`, `pickup_time: NaiveTime`, `schedule`, `default_lang`, `custom_js: Option<Arc<str>>`, `custom_css: Option<Arc<str>>`. Rebuilt per request via `State::load`.
 
 **Schedule primitive**: `Week` — a `bitflags! u8` set (`FIRST..FIFTH`) with custom serde as an int list 1..5. Enables union/difference/overlap checks in validation.
 
@@ -74,6 +74,7 @@ the bottom of `main.rs`, and `i18n.rs` has its own.
 - **Old-format auto-migration**: new `Db` tried first, `DbOld` fallback expanded to full-week entries and rewritten in place (backward compatibility).
 - **JSON vs form POST on one endpoint**: `body_is_json` sniffs Content-Type or a leading `{`, giving a machine full-replace API while keeping the JS-free form path.
 - **`custom_js` / `custom_css`** (optional `Db`/`State` fields): `Page::fmt` appends `custom_js` as the last element before `</body>` and injects `custom_css` in `<head>` right after the built-in `<style>`. `is_url` treats a value as a URL when it is `http://`, `https://`, `//host/…`, or a single-token relative reference free of JS/CSS punctuation; URLs become `<script src>` / `<link rel="stylesheet">`, everything else becomes inline `<script>` / `<style>`, minified by `minify::minify_js` / `minify::minify_css` (oxc / lightningcss, same pipeline as `build.rs`) with a fallback to the trimmed source when it does not parse. Both are exposed as textareas in the backoffice and as `custom_js`/`custom_css` in the `admin.json` read/write API; `validate_and_save` stores them trimmed (empty → `null`).
+- **`Arc<str>` for immutable strings**: `Entry.kind`, `custom_js`/`custom_css` (and the view/form structs deriving from them) are `Arc<str>` rather than `String`, so cloning per request is a refcount bump, not a deep copy. Serialization is unchanged via serde's `rc` feature, so the TOML/JSON shape stays the same.
 
 ## 6. External dependencies
 
@@ -85,7 +86,7 @@ the bottom of `main.rs`, and `i18n.rs` has its own.
 | `bitflags` | `Week` 1..5 bitmask |
 | `chrono` / `chrono-tz` | Time/date math; `Tz` IANA resolve + `TZ_VARIANTS` for the timezone `<select>` |
 | `clap` (`derive`, `env`) | Subcommands + `TRASHDIFF_DB` env |
-| `serde` / `serde_json` / `toml` | (De)serialization |
+| `serde` (`derive`, `rc`) / `serde_json` / `toml` | (De)serialization; `rc` enables `Arc<str>` fields |
 | `http` / `http-body-util` / `bytes` | Shared request/response types + boxed body |
 | `form_urlencoded` | URL-encoded form parsing |
 | `lightningcss` (dep + build-dep) | Minify CSS: `style.css`/`dark.css` at build time (`build.rs`) and inline `custom_css` at request time (`minify.rs`) |

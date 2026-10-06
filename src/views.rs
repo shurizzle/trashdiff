@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::{self, Write};
+use std::sync::Arc;
 
 use chrono::{DateTime, Datelike, Duration, NaiveTime, Utc};
 use chrono_tz::{TZ_VARIANTS, Tz};
@@ -63,8 +64,8 @@ pub struct Page<Title: LocalizedDisplay, Body: LocalizedDisplay>(
     pub Title,
     pub Body,
     pub Theme,
-    pub Option<String>,
-    pub Option<String>,
+    pub Option<Arc<str>>,
+    pub Option<Arc<str>>,
 );
 
 /// Whether a custom resource value is a URL to load by reference rather than
@@ -296,15 +297,15 @@ pub fn home_view(st: &State, now: DateTime<Utc>) -> HomeView {
 
 pub struct AdminRow {
     pub weeks: Week,
-    pub kind: String,
+    pub kind: Arc<str>,
 }
 
 pub struct AdminJson {
     pub timezone: Tz,
     pub pickup_time: NaiveTime,
     pub default_lang: Option<Lang>,
-    pub custom_js: Option<String>,
-    pub custom_css: Option<String>,
+    pub custom_js: Option<Arc<str>>,
+    pub custom_css: Option<Arc<str>>,
     pub schedule: [Vec<AdminRow>; 7],
 }
 
@@ -373,8 +374,8 @@ pub struct AdminForm {
     pub entries: Vec<Entry>,
     pub action: String,
     pub default_lang: String,
-    pub custom_js: String,
-    pub custom_css: String,
+    pub custom_js: Arc<str>,
+    pub custom_css: Arc<str>,
 }
 
 #[derive(Debug, Default)]

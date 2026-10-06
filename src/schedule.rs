@@ -3,6 +3,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use bitflags::bitflags;
 use chrono::{DateTime, Datelike, Duration, NaiveTime, Weekday};
@@ -136,9 +137,9 @@ pub struct Db {
     #[serde(default)]
     pub default_lang: Option<Lang>,
     #[serde(default)]
-    pub custom_js: Option<String>,
+    pub custom_js: Option<Arc<str>>,
     #[serde(default)]
-    pub custom_css: Option<String>,
+    pub custom_css: Option<Arc<str>>,
 }
 
 #[derive(Deserialize)]
@@ -146,7 +147,7 @@ pub struct DbOld {
     timezone: String,
     pickup_time: String,
     #[serde(default)]
-    schedule: HashMap<String, String>,
+    schedule: HashMap<String, Arc<str>>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -154,7 +155,7 @@ pub struct Entry {
     pub day: String,
     pub weeks: Week,
     #[serde(rename = "type")]
-    pub kind: String,
+    pub kind: Arc<str>,
 }
 
 fn default_db() -> Db {
@@ -198,15 +199,15 @@ pub struct State {
     pub pickup_time: NaiveTime,
     pub schedule: Vec<Entry>,
     pub default_lang: Option<Lang>,
-    pub custom_js: Option<String>,
-    pub custom_css: Option<String>,
+    pub custom_js: Option<Arc<str>>,
+    pub custom_css: Option<Arc<str>>,
 }
 
 impl State {
     pub fn load(db_path: PathBuf) -> Result<State, String> {
         let db = if db_path.exists() {
-            let mut f = File::open(&db_path)
-                .map_err(|e| format!("cannot open {:?}: {e}", db_path))?;
+            let mut f =
+                File::open(&db_path).map_err(|e| format!("cannot open {:?}: {e}", db_path))?;
             f.lock_shared()
                 .map_err(|e| format!("lock {:?}: {e}", db_path))?;
             let mut raw = String::new();
@@ -273,7 +274,7 @@ impl State {
         self.schedule
             .iter()
             .find(|e| e.day == day && e.weeks.contains(week_of(week)))
-            .map(|e| e.kind.as_str())
+            .map(|e| &*e.kind)
             .unwrap_or("")
     }
 

@@ -32,7 +32,7 @@ oxc_mangler = "0.153"
 oxc_minifier = "0.153"
 oxc_parser = "0.153"
 oxc_span = "0.153"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-std", "io-util", "net", "macros"], optional = true }
 toml = "1.1"

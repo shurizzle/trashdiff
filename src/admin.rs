@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use chrono::NaiveTime;
 use chrono_tz::Tz;
@@ -13,7 +14,7 @@ use crate::views::{AdminForm, FormErrors};
 struct WriteRow {
     weeks: Week,
     #[serde(rename = "type")]
-    kind: String,
+    kind: Arc<str>,
 }
 
 #[derive(Deserialize)]
@@ -22,9 +23,9 @@ struct AdminWrite {
     pickup_time: String,
     default_lang: Option<Lang>,
     #[serde(default)]
-    custom_js: Option<String>,
+    custom_js: Option<Arc<str>>,
     #[serde(default)]
-    custom_css: Option<String>,
+    custom_css: Option<Arc<str>>,
     schedule: [Vec<WriteRow>; 7],
 }
 
@@ -169,7 +170,7 @@ pub fn validate_and_save(db_path: &PathBuf, f: &AdminForm, lng: Lang) -> Result<
                 schedule.push(Entry {
                     day: e.day.clone(),
                     weeks,
-                    kind: e.kind.trim().to_string(),
+                    kind: e.kind.trim().into(),
                 });
             }
         }
@@ -180,11 +181,11 @@ pub fn validate_and_save(db_path: &PathBuf, f: &AdminForm, lng: Lang) -> Result<
     // Stored trimmed; minified at render time, falling back to this on parse error.
     let custom_js = {
         let custom_js = f.custom_js.trim();
-        (!custom_js.is_empty()).then(|| custom_js.to_string())
+        (!custom_js.is_empty()).then(|| custom_js.into())
     };
     let custom_css = {
         let custom_css = f.custom_css.trim();
-        (!custom_css.is_empty()).then(|| custom_css.to_string())
+        (!custom_css.is_empty()).then(|| custom_css.into())
     };
     let db = Db {
         timezone: f.timezone.to_string(),
@@ -219,7 +220,7 @@ pub fn process_admin(
         f.entries.push(Entry {
             day: day.to_string(),
             weeks: Week::all().difference(covered),
-            kind: String::new(),
+            kind: Arc::from(""),
         });
         return Ok(Some(f));
     }
@@ -275,7 +276,7 @@ pub fn form_from_body(body: &[u8]) -> AdminForm {
             entries.push(Entry {
                 day: day.to_string(),
                 weeks,
-                kind: get(&format!("{day}_type_{i}")),
+                kind: get(&format!("{day}_type_{i}")).into(),
             });
         }
     }
@@ -295,7 +296,7 @@ pub fn form_from_body(body: &[u8]) -> AdminForm {
         entries,
         action,
         default_lang: get("default_lang"),
-        custom_js: get("custom_js"),
-        custom_css: get("custom_css"),
+        custom_js: get("custom_js").into(),
+        custom_css: get("custom_css").into(),
     }
 }
