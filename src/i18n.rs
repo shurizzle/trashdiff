@@ -85,6 +85,7 @@ pub enum T<'a> {
     TzLabel,
     LangLabel,
     JsLabel,
+    CssLabel,
     EmptyHint,
     Save,
     ErrTz,
@@ -165,6 +166,7 @@ impl<'a> fmt::Display for LocalizedT<'a> {
                 T::TzLabel => f.write_str("Timezone"),
                 T::LangLabel => f.write_str("Lingua di default"),
                 T::JsLabel => f.write_str("JavaScript personalizzato (URL o codice)"),
+                T::CssLabel => f.write_str("CSS personalizzato (URL o codice)"),
                 T::EmptyHint => f.write_str(concat!(
                     "Una riga per ogni ritiro: spunta le settimane del mese (1-5) e ",
                     "scrivi il tipo. Il + duplica il giorno, il - elimina la riga. ",
@@ -214,6 +216,7 @@ impl<'a> fmt::Display for LocalizedT<'a> {
                 T::TzLabel => f.write_str("Timezone"),
                 T::LangLabel => f.write_str("Default language"),
                 T::JsLabel => f.write_str("Custom JavaScript (URL or code)"),
+                T::CssLabel => f.write_str("Custom CSS (URL or code)"),
                 T::EmptyHint => f.write_str(concat!(
                     "One row per pickup: tick the weeks of the month (1-5) and write ",
                     "the type. The + duplicates the day, the - removes the row. Empty ",

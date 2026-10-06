@@ -109,8 +109,8 @@ trashdiff cli
   when it ends) and `week` as waste-type strings (or `null` when nothing is
   collected); `week` is the current week, 7 entries Monday..Sunday
 - `/admin.json` — backoffice configuration as JSON: `timezone`,
-  `pickup_time`, `default_lang` (`null` = auto → English), `custom_js`
-  (`null` = none; URL or inline script) and `schedule`, an
+  `pickup_time`, `default_lang` (`null` = auto → English), `custom_js` and
+  `custom_css` (`null` = none; URL or inline content) and `schedule`, an
   array of 7 arrays (Monday..Sunday), each holding that weekday's rows
   `{ "weeks": [...], "type": "..." }` in the order shown on the page
 - `POST /admin` — full-replace write API: send the `admin.json` shape with
@@ -123,7 +123,7 @@ trashdiff cli
 - `/admin` — backoffice: one row per pickup under each weekday (weekdays are
   fixed and always shown). Tick weeks 1-5 and type the waste type; `+`
   duplicates that weekday, `-` removes the row, no JS needed. Plus global
-  pickup time, timezone and the custom JavaScript field
+  pickup time, timezone and the custom JavaScript/CSS fields
 - `EN`/`IT` toggle — language switch, persisted in a cookie
 - Dark mode — follows the OS theme (`prefers-color-scheme`)
 
@@ -138,6 +138,7 @@ concurrently.
 timezone    = "Europe/Rome"
 pickup_time = "17:00"
 custom_js   = "https://example.com/analytics.js"
+custom_css  = "https://example.com/custom.css"
 
 [[schedule]]
 day = "monday"
@@ -154,6 +155,13 @@ type = "Carta"
   Inline code is minified with oxc (same pipeline as `admin.js`); if it does
   not parse, the trimmed original is emitted instead. Editable from the
   backoffice and via the `admin.json` write API.
+- `custom_css` (optional): added in `<head>`, right after the built-in
+  `<style>`, on every HTML page. If the value is a URL (same forms as
+  `custom_js`) it is emitted as `<link rel="stylesheet" href="…">`; otherwise
+  it is emitted inline as a `<style>` child. Inline CSS is minified with
+  lightningcss (same pipeline as `style.css`); if it does not parse, the
+  trimmed original is emitted instead. Editable from the backoffice and via
+  the `admin.json` write API.
 - `schedule`: list of entries; each entry has a weekday (`monday`..`sunday`),
   the weeks of the month (1-5) it applies to, and the waste type. Entries
   must not overlap on the same `(day, week)` pair — the backoffice rejects

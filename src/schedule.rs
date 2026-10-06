@@ -137,6 +137,8 @@ pub struct Db {
     pub default_lang: Option<Lang>,
     #[serde(default)]
     pub custom_js: Option<String>,
+    #[serde(default)]
+    pub custom_css: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -162,6 +164,7 @@ fn default_db() -> Db {
         schedule: Vec::new(),
         default_lang: None,
         custom_js: None,
+        custom_css: None,
     }
 }
 
@@ -181,6 +184,7 @@ fn migrate_old(old: DbOld) -> Db {
         schedule,
         default_lang: None,
         custom_js: None,
+        custom_css: None,
     }
 }
 
@@ -195,6 +199,7 @@ pub struct State {
     pub schedule: Vec<Entry>,
     pub default_lang: Option<Lang>,
     pub custom_js: Option<String>,
+    pub custom_css: Option<String>,
 }
 
 impl State {
@@ -240,6 +245,7 @@ impl State {
             schedule: db.schedule,
             default_lang: db.default_lang,
             custom_js: db.custom_js,
+            custom_css: db.custom_css,
         })
     }
 

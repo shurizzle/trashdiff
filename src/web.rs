@@ -51,7 +51,13 @@ async fn home(req: HttpRequest, data: web::Data<AppState>) -> HttpResponse {
         .body(
             Localized::from((
                 lng,
-                Page(T::TitleHome, HomeHtml(&view), theme, st.custom_js.clone()),
+                Page(
+                    T::TitleHome,
+                    HomeHtml(&view),
+                    theme,
+                    st.custom_js.clone(),
+                    st.custom_css.clone(),
+                ),
             ))
             .to_string(),
         )
@@ -104,6 +110,7 @@ async fn admin_get(req: HttpRequest, data: web::Data<AppState>) -> HttpResponse 
                     AdminFormHtml(admin_form_from_state(&st), FormErrors::default()),
                     theme,
                     st.custom_js.clone(),
+                    st.custom_css.clone(),
                 ),
             ))
             .to_string(),
@@ -136,6 +143,7 @@ async fn admin_post(req: HttpRequest, data: web::Data<AppState>, body: web::Byte
                         AdminFormHtml(form, FormErrors::default()),
                         theme,
                         st.custom_js.clone(),
+                        st.custom_css.clone(),
                     ),
                 ))
                 .to_string(),
@@ -153,6 +161,7 @@ async fn admin_post(req: HttpRequest, data: web::Data<AppState>, body: web::Byte
                         AdminFormHtml(form, errs),
                         theme,
                         st.custom_js.clone(),
+                        st.custom_css.clone(),
                     ),
                 ))
                 .to_string(),

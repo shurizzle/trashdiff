@@ -168,6 +168,7 @@ pub fn route_cgi(
                             AdminFormHtml(form, FormErrors::default()),
                             theme,
                             st.custom_js.clone(),
+                            st.custom_css.clone(),
                         ),
                     ))
                     .to_string();
@@ -182,6 +183,7 @@ pub fn route_cgi(
                             AdminFormHtml(form, errs),
                             theme,
                             st.custom_js.clone(),
+                            st.custom_css.clone(),
                         ),
                     ))
                     .to_string();
@@ -196,6 +198,7 @@ pub fn route_cgi(
                 AdminFormHtml(admin_form_from_state(st), FormErrors::default()),
                 theme,
                 st.custom_js.clone(),
+                st.custom_css.clone(),
             ),
         ))
         .to_string();
@@ -210,7 +213,13 @@ pub fn route_cgi(
     let view = home_view(st, Utc::now());
     let html = Localized::from((
         lng,
-        Page(T::TitleHome, HomeHtml(&view), theme, st.custom_js.clone()),
+        Page(
+            T::TitleHome,
+            HomeHtml(&view),
+            theme,
+            st.custom_js.clone(),
+            st.custom_css.clone(),
+        ),
     ))
     .to_string();
     respond(StatusCode::OK, html)

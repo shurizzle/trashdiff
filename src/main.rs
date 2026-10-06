@@ -132,7 +132,7 @@ fn main() -> std::io::Result<()> {
 mod tests {
     use crate::admin::*;
     use crate::i18n::{Lang, Localized, T};
-    use crate::minify::minify_js;
+    use crate::minify::{minify_css, minify_js};
     use crate::schedule::*;
     use crate::transport::*;
     use crate::views::*;
@@ -178,6 +178,7 @@ mod tests {
             schedule,
             default_lang: None,
             custom_js: None,
+            custom_css: None,
         }
     }
 
@@ -211,36 +212,69 @@ mod tests {
     }
 
     #[test]
-    fn page_appends_custom_js_before_body_close() {
-        let page = |js: Option<&str>| {
+    fn minify_css_compresses_or_falls_back() {
+        let src = "body { color : red ; }";
+        let out = minify_css(src);
+        assert!(!out.contains('\n'));
+        assert!(out.len() < src.len());
+        assert!(out.contains("color:red"));
+        // unparsable input falls back to the trimmed source
+        assert_eq!(minify_css("}"), "}");
+    }
+
+    #[test]
+    fn page_appends_custom_js_and_css() {
+        let page = |js: Option<&str>, css: Option<&str>| {
             Localized::from((
                 Lang::En,
-                Page(T::TitleHome, T::Save, Theme::Auto, js.map(str::to_string)),
+                Page(
+                    T::TitleHome,
+                    T::Save,
+                    Theme::Auto,
+                    js.map(str::to_string),
+                    css.map(str::to_string),
+                ),
             ))
             .to_string()
         };
-        // inline code -> minified child of a <script> tag
-        let inline = page(Some("alert(1)"));
-        assert!(inline.contains("<script>alert(1)"));
-        assert!(inline.contains("</script></body>"));
+        let js = |js| page(js, None);
+        // inline code -> minified child of a <script> tag, last before </body>
+        assert!(js(Some("alert(1)")).contains("<script>alert(1)"));
+        assert!(js(Some("alert(1)")).contains("</script></body>"));
         // surrounding whitespace is trimmed before minifying
-        assert!(page(Some("  alert(1)  ")).contains("<script>alert(1)"));
+        assert!(js(Some("  alert(1)  ")).contains("<script>alert(1)"));
         // unparsable code falls back to the trimmed original
-        assert!(page(Some("  function (  ")).contains("<script>function (</script></body>"));
+        assert!(js(Some("  function (  ")).contains("<script>function (</script></body>"));
         // absolute / protocol-relative / relative URLs -> src attribute
         assert!(
-            page(Some("https://example.com/a.js"))
+            js(Some("https://example.com/a.js"))
                 .contains("<script src=\"https://example.com/a.js\"></script></body>")
         );
         assert!(
-            page(Some("//cdn.example.com/a.js"))
+            js(Some("//cdn.example.com/a.js"))
                 .contains("<script src=\"//cdn.example.com/a.js\"></script></body>")
         );
-        assert!(page(Some("/js/a.js")).contains("<script src=\"/js/a.js\"></script></body>"));
-        assert!(page(Some("./a.js")).contains("<script src=\"./a.js\"></script></body>"));
+        assert!(js(Some("/js/a.js")).contains("<script src=\"/js/a.js\"></script></body>"));
+        assert!(js(Some("./a.js")).contains("<script src=\"./a.js\"></script></body>"));
         // absent / blank -> nothing injected
-        assert!(!page(None).contains("<script></script>"));
-        assert!(!page(Some("   ")).contains("src=\"\""));
+        assert!(!js(None).contains("<script></script>"));
+        assert!(!js(Some("   ")).contains("src=\"\""));
+
+        // inline CSS -> minified <style> in <head>, after the built-in one
+        let inline_css = page(None, Some("body { color : red ; }"));
+        assert!(inline_css.contains("<style>body{color:red"));
+        assert!(inline_css.contains("</style></head><body>"));
+        // unparsable CSS falls back to the trimmed original
+        assert!(page(None, Some("  }  ")).contains("<style>}</style>"));
+        // URL -> <link rel="stylesheet">
+        assert!(
+            page(None, Some("https://example.com/a.css"))
+                .contains("<link rel=\"stylesheet\" href=\"https://example.com/a.css\">")
+        );
+        assert!(
+            page(None, Some("/css/a.css"))
+                .contains("<link rel=\"stylesheet\" href=\"/css/a.css\">")
+        );
     }
 
     #[test]
@@ -292,11 +326,13 @@ mod tests {
         });
         st.default_lang = Some(Lang::En);
         st.custom_js = Some("alert(1)".to_string());
+        st.custom_css = Some("body{color:red}".to_string());
         let json = serde_json::to_value(admin_json(&st)).unwrap();
         assert_eq!(json["timezone"], "Europe/Rome");
         assert_eq!(json["pickup_time"], "17:00");
         assert_eq!(json["default_lang"], "en");
         assert_eq!(json["custom_js"], "alert(1)");
+        assert_eq!(json["custom_css"], "body{color:red}");
         let schedule = json["schedule"].as_array().unwrap();
         assert_eq!(schedule.len(), 7);
         let monday = schedule[0].as_array().unwrap();
@@ -393,6 +429,7 @@ mod tests {
             action: "save".to_string(),
             default_lang: String::new(),
             custom_js: String::new(),
+            custom_css: String::new(),
         };
         let errs = validate_and_save(&PathBuf::from("/nonexistent"), &f, Lang::It).unwrap_err();
         assert!(errs.fields.contains_key("monday:1"));
@@ -419,6 +456,7 @@ mod tests {
             action: "save".to_string(),
             default_lang: String::new(),
             custom_js: String::new(),
+            custom_css: String::new(),
         };
         let errs = validate_and_save(&PathBuf::from("/nonexistent"), &f, Lang::It).unwrap_err();
         assert!(errs.fields.contains_key("monday:1"));
@@ -789,7 +827,7 @@ mod tests {
     #[test]
     fn admin_write_full_replace_roundtrips() {
         let db = temp_db();
-        let body = br#"{"timezone":"Europe/Rome","pickup_time":"08:00","default_lang":null,"custom_js":"alert(1)","schedule":[[{"weeks":[1,3],"type":"Carta"}],[],[],[],[],[],[]]}"#;
+        let body = br#"{"timezone":"Europe/Rome","pickup_time":"08:00","default_lang":null,"custom_js":"alert(1)","custom_css":"body{color:red}","schedule":[[{"weeks":[1,3],"type":"Carta"}],[],[],[],[],[],[]]}"#;
         match admin_json_write(&db, body, Lang::En) {
             JsonWrite::Saved => {}
             other => panic!("expected Saved, got {other:?}"),
@@ -797,6 +835,10 @@ mod tests {
         let raw = std::fs::read_to_string(&db).unwrap();
         assert!(raw.contains("pickup_time = \"08:00\""), "raw:\n{raw}");
         assert!(raw.contains("custom_js = \"alert(1)\""), "raw:\n{raw}");
+        assert!(
+            raw.contains("custom_css = \"body{color:red}\""),
+            "raw:\n{raw}"
+        );
         assert!(raw.contains("type = \"Carta\""));
         assert!(raw.contains("\n    1,"));
         assert!(raw.contains("\n    3,"));
@@ -805,7 +847,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_js_roundtrips_through_admin_form() {
+    fn custom_resources_roundtrip_through_admin_form() {
         let db = temp_db();
         let f = AdminForm {
             timezone: "Europe/Rome".to_string(),
@@ -814,18 +856,23 @@ mod tests {
             action: "save".to_string(),
             default_lang: String::new(),
             custom_js: "  console.log('x');\n".to_string(),
+            custom_css: "  body { color: red; }\n".to_string(),
         };
         validate_and_save(&db, &f, Lang::En).unwrap();
         let st = State::load(db.clone()).unwrap();
         // stored trimmed; minified only when rendered
         assert_eq!(st.custom_js.as_deref(), Some("console.log('x');"));
-        // empty textarea clears the key
+        assert_eq!(st.custom_css.as_deref(), Some("body { color: red; }"));
+        // empty textareas clear both keys
         let f = AdminForm {
             custom_js: String::new(),
+            custom_css: String::new(),
             ..f
         };
         validate_and_save(&db, &f, Lang::En).unwrap();
-        assert_eq!(State::load(db.clone()).unwrap().custom_js, None);
+        let st = State::load(db.clone()).unwrap();
+        assert_eq!(st.custom_js, None);
+        assert_eq!(st.custom_css, None);
         let _ = std::fs::remove_file(&db);
     }
 

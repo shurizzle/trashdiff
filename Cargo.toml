@@ -25,6 +25,7 @@ clap = { version = "4", features = ["derive", "env"] }
 form_urlencoded = "1"
 http = "1"
 http-body-util = "0.1"
+lightningcss = { version = "1.0.0-alpha.72", default-features = false }
 oxc_allocator = "0.150"
 oxc_codegen = "0.150"
 oxc_mangler = "0.150"
