@@ -109,20 +109,21 @@ trashdiff cli
   when it ends) and `week` as waste-type strings (or `null` when nothing is
   collected); `week` is the current week, 7 entries Monday..Sunday
 - `/admin.json` — backoffice configuration as JSON: `timezone`,
-  `pickup_time`, `default_lang` (`null` = auto → English) and `schedule`, an
+  `pickup_time`, `default_lang` (`null` = auto → English), `custom_js`
+  (`null` = none; URL or inline script) and `schedule`, an
   array of 7 arrays (Monday..Sunday), each holding that weekday's rows
   `{ "weeks": [...], "type": "..." }` in the order shown on the page
 - `POST /admin` — full-replace write API: send the `admin.json` shape with
   `Content-Type: application/json` (a body starting with `{` is also
   detected). Validated like the backoffice save (type required for the ticked
-  weeks, no overlapping `(day, week)` pairs, empty `weeks` rows dropped); on
+  weeks, no overlapping `(day, week)` pairs, empty `weeks` rows dropped; on
   success returns `200` with the refreshed `admin.json`, invalid input gives
   `400` (`{"error": ...}` for parse failures, `{fields, overlaps}` for
   validation errors). Form posts are unchanged
 - `/admin` — backoffice: one row per pickup under each weekday (weekdays are
   fixed and always shown). Tick weeks 1-5 and type the waste type; `+`
   duplicates that weekday, `-` removes the row, no JS needed. Plus global
-  pickup time and timezone
+  pickup time, timezone and the custom JavaScript field
 - `EN`/`IT` toggle — language switch, persisted in a cookie
 - Dark mode — follows the OS theme (`prefers-color-scheme`)
 
@@ -136,6 +137,7 @@ concurrently.
 ```toml
 timezone    = "Europe/Rome"
 pickup_time = "17:00"
+custom_js   = "https://example.com/analytics.js"
 
 [[schedule]]
 day = "monday"
@@ -145,6 +147,13 @@ type = "Carta"
 
 - `timezone`: IANA name (required — servers usually run UTC, the schedule is
   wall-clock local time)
+- `custom_js` (optional): added as the last element before `</body>` on every
+  HTML page. If the value is a URL (`http://…`, `https://…`, `//host/…` or a
+  relative reference such as `/js/a.js` or `./a.js`) it is emitted as
+  `<script src="…">`; otherwise it is emitted inline as a `<script>` child.
+  Inline code is minified with oxc (same pipeline as `admin.js`); if it does
+  not parse, the trimmed original is emitted instead. Editable from the
+  backoffice and via the `admin.json` write API.
 - `schedule`: list of entries; each entry has a weekday (`monday`..`sunday`),
   the weeks of the month (1-5) it applies to, and the waste type. Entries
   must not overlap on the same `(day, week)` pair — the backoffice rejects

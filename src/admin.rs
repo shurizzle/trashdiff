@@ -21,6 +21,8 @@ struct AdminWrite {
     timezone: String,
     pickup_time: String,
     default_lang: Option<Lang>,
+    #[serde(default)]
+    custom_js: Option<String>,
     schedule: [Vec<WriteRow>; 7],
 }
 
@@ -43,6 +45,7 @@ fn admin_write_form(w: AdminWrite) -> AdminForm {
         entries,
         action: String::new(),
         default_lang: w.default_lang.map(|l| l.to_string()).unwrap_or_default(),
+        custom_js: w.custom_js.unwrap_or_default(),
     }
 }
 
@@ -171,11 +174,17 @@ pub fn validate_and_save(db_path: &PathBuf, f: &AdminForm, lng: Lang) -> Result<
     if !errs.fields.is_empty() || !errs.bad_weeks.is_empty() {
         return Err(errs);
     }
+    // Stored trimmed; minified at render time, falling back to this on parse error.
+    let custom_js = {
+        let custom_js = f.custom_js.trim();
+        (!custom_js.is_empty()).then(|| custom_js.to_string())
+    };
     let db = Db {
         timezone: f.timezone.to_string(),
         pickup_time: f.pickup_time.to_string(),
         schedule,
         default_lang,
+        custom_js,
     };
     if let Err(e) = State::save_file(db_path, &db) {
         let mut errs = FormErrors::default();
@@ -278,5 +287,6 @@ pub fn form_from_body(body: &[u8]) -> AdminForm {
         entries,
         action,
         default_lang: get("default_lang"),
+        custom_js: get("custom_js"),
     }
 }

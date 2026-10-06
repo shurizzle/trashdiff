@@ -6,6 +6,7 @@ use chrono_tz::{TZ_VARIANTS, Tz};
 use serde::{Serialize, ser::SerializeStruct};
 
 use crate::i18n::{Lang, Localized, LocalizedDisplay, LocalizedRef, T, days, days_full, esc};
+use crate::minify::minify_js;
 use crate::schedule::{DAY_KEYS, Entry, State, Week, day_index, sort_key, week_of};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -58,7 +59,33 @@ fn parse_cookie_theme(cookie: &str) -> Option<Theme> {
     })
 }
 
-pub struct Page<Title: LocalizedDisplay, Body: LocalizedDisplay>(pub Title, pub Body, pub Theme);
+pub struct Page<Title: LocalizedDisplay, Body: LocalizedDisplay>(
+    pub Title,
+    pub Body,
+    pub Theme,
+    pub Option<String>,
+);
+
+/// Whether a `custom_js` value is a URL to load via `<script src>` rather than
+/// inline code. Absolute (`http://`, `https://`) and protocol-relative (`//`)
+/// URLs are always accepted; anything else counts as a relative reference only
+/// when it is a single token free of JS punctuation (`;{}()"'` + backtick), so
+/// real code such as `alert(1)` or `console.log(x);` stays inline.
+fn script_url(value: &str) -> bool {
+    let v = value.trim();
+    if v.is_empty() {
+        return false;
+    }
+    let lower = v.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return true;
+    }
+    if v.starts_with("//") {
+        return true;
+    }
+    !v.chars()
+        .any(|c| c.is_whitespace() || matches!(c, ';' | '{' | '}' | '(' | ')' | '"' | '\'' | '`'))
+}
 
 impl<Title: LocalizedDisplay, Body: LocalizedDisplay> LocalizedDisplay for Page<Title, Body> {
     fn fmt(&self, lng: Lang, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -103,6 +130,23 @@ impl<Title: LocalizedDisplay, Body: LocalizedDisplay> LocalizedDisplay for Page<
         fmt::Debug::fmt(&lng, f)?;
         f.write_str("</a></span></nav>")?;
         fmt::Display::fmt(&LocalizedRef::from((lng, &self.1)), f)?;
+        if let Some(js) = self.3.as_deref() {
+            let js = js.trim();
+            if !js.is_empty() {
+                if script_url(js) {
+                    f.write_str("<script src=\"")?;
+                    fmt::Display::fmt(&esc(js), f)?;
+                    f.write_str("\"></script>")?;
+                } else {
+                    // Minified like the build step; fall back to the trimmed
+                    // source when it does not parse.
+                    let minified = minify_js(js);
+                    f.write_str("<script>")?;
+                    f.write_str(&minified)?;
+                    f.write_str("</script>")?;
+                }
+            }
+        }
         f.write_str("</body></html>")
     }
 }
@@ -239,6 +283,7 @@ pub struct AdminJson {
     pub timezone: Tz,
     pub pickup_time: NaiveTime,
     pub default_lang: Option<Lang>,
+    pub custom_js: Option<String>,
     pub schedule: [Vec<AdminRow>; 7],
 }
 
@@ -254,10 +299,11 @@ impl Serialize for AdminRow {
 impl Serialize for AdminJson {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let mut buf = [0u8; 5];
-        let mut st = s.serialize_struct("AdminJson", 4)?;
+        let mut st = s.serialize_struct("AdminJson", 5)?;
         st.serialize_field("timezone", &self.timezone)?;
         st.serialize_field("pickup_time", hhmm(&self.pickup_time, &mut buf))?;
         st.serialize_field("default_lang", &self.default_lang)?;
+        st.serialize_field("custom_js", &self.custom_js)?;
         st.serialize_field("schedule", &self.schedule)?;
         st.end()
     }
@@ -281,6 +327,7 @@ pub fn admin_json(st: &State) -> AdminJson {
         timezone: st.timezone,
         pickup_time: st.pickup_time,
         default_lang: st.default_lang,
+        custom_js: st.custom_js.clone(),
         schedule: std::array::from_fn(|i| rows_for(DAY_KEYS[i])),
     }
 }
@@ -292,6 +339,7 @@ pub fn admin_form_from_state(st: &State) -> AdminForm {
         entries: st.schedule.clone(),
         action: String::new(),
         default_lang: st.default_lang.map(|l| l.to_string()).unwrap_or_default(),
+        custom_js: st.custom_js.clone().unwrap_or_default(),
     }
 }
 
@@ -301,6 +349,7 @@ pub struct AdminForm {
     pub entries: Vec<Entry>,
     pub action: String,
     pub default_lang: String,
+    pub custom_js: String,
 }
 
 #[derive(Debug, Default)]
@@ -509,6 +558,11 @@ impl LocalizedDisplay for AdminFormHtml {
             f.write_str("</span>")?;
         }
         f.write_str("</p>")?;
+        f.write_str("<p><label>")?;
+        fmt::Display::fmt(&esc(Localized::from((lng, T::JsLabel))), f)?;
+        f.write_str("<br><textarea name=\"custom_js\" rows=\"4\">")?;
+        fmt::Display::fmt(&esc(&self.0.custom_js), f)?;
+        f.write_str("</textarea></label></p>")?;
 
         let full = days_full(lng);
         for (di, day) in DAY_KEYS.iter().enumerate() {

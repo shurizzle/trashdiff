@@ -40,10 +40,12 @@ nav a {
   border-radius: 0.5rem;
 }
 
-input[type="text"] {
+input[type="text"],
+textarea {
   width: 100%;
   box-sizing: border-box;
   padding: 0.4rem;
+  font-family: inherit;
 }
 
 .field {

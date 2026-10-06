@@ -48,7 +48,13 @@ async fn home(req: HttpRequest, data: web::Data<AppState>) -> HttpResponse {
     let view = home_view(&st, Utc::now());
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
-        .body(Localized::from((lng, Page(T::TitleHome, HomeHtml(&view), theme))).to_string())
+        .body(
+            Localized::from((
+                lng,
+                Page(T::TitleHome, HomeHtml(&view), theme, st.custom_js.clone()),
+            ))
+            .to_string(),
+        )
 }
 
 async fn home_json_endpoint(_req: HttpRequest, data: web::Data<AppState>) -> HttpResponse {
@@ -97,6 +103,7 @@ async fn admin_get(req: HttpRequest, data: web::Data<AppState>) -> HttpResponse 
                     T::TitleAdmin,
                     AdminFormHtml(admin_form_from_state(&st), FormErrors::default()),
                     theme,
+                    st.custom_js.clone(),
                 ),
             ))
             .to_string(),
@@ -128,6 +135,7 @@ async fn admin_post(req: HttpRequest, data: web::Data<AppState>, body: web::Byte
                         T::TitleAdmin,
                         AdminFormHtml(form, FormErrors::default()),
                         theme,
+                        st.custom_js.clone(),
                     ),
                 ))
                 .to_string(),
@@ -138,8 +146,16 @@ async fn admin_post(req: HttpRequest, data: web::Data<AppState>, body: web::Byte
         Err((form, errs)) => HttpResponse::BadRequest()
             .content_type("text/html; charset=utf-8")
             .body(
-                Localized::from((lng, Page(T::TitleAdmin, AdminFormHtml(form, errs), theme)))
-                    .to_string(),
+                Localized::from((
+                    lng,
+                    Page(
+                        T::TitleAdmin,
+                        AdminFormHtml(form, errs),
+                        theme,
+                        st.custom_js.clone(),
+                    ),
+                ))
+                .to_string(),
             ),
     }
 }

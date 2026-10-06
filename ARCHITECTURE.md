@@ -21,6 +21,7 @@ into a handful of modules plus static assets.
 | `src/web.rs` | actix-web HTTP frontend: `AppState`, handlers, `serve` |
 | `src/transport.rs` | Non-actix frontends: `route_cgi`, `cgi_run`/`fcgi_run`/`scgi_run`, `cli_cmd`, response helpers |
 | `src/i18n.rs` | `Lang` (IT/EN), the `T` message-key enum, translation table, HTML escaping, `LocalizedDisplay` trait |
+| `src/minify.rs` | Runtime oxc minifier for inline `custom_js` (`minify_js`), same pipeline as `build.rs` |
 | `src/admin.js` | Progressive-enhancement JS for the backoffice (add/remove rows, client-side validation); no framework |
 | `src/style.css`, `src/dark.css` | Light + dark stylesheets |
 | `build.rs` | Minifies `admin.js` (oxc) and the CSS (lightningcss) into `$OUT_DIR` at build time |
@@ -32,10 +33,10 @@ the bottom of `main.rs`, and `i18n.rs` has its own.
 ## 2. Key types and relationships
 
 **Config / disk layer** (`schedule.rs`):
-- `Db` — serde TOML struct: `timezone`, `pickup_time`, `schedule: Vec<Entry>`, optional `default_lang`.
+- `Db` — serde TOML struct: `timezone`, `pickup_time`, `schedule: Vec<Entry>`, optional `default_lang`, optional `custom_js`.
 - `Entry` — one schedule line: `day: String`, `weeks: Week`, `kind: String` (`#[serde(rename="type")]`).
 - `DbOld` — legacy format `schedule: HashMap<String,String>` (day→type); auto-migrated by `migrate_old`.
-- `State` — parsed, in-memory runtime form (not serde): `db_path`, `timezone: Tz`, `pickup_time: NaiveTime`, `schedule`, `default_lang`. Rebuilt per request via `State::load`.
+- `State` — parsed, in-memory runtime form (not serde): `db_path`, `timezone: Tz`, `pickup_time: NaiveTime`, `schedule`, `default_lang`, `custom_js`. Rebuilt per request via `State::load`.
 
 **Schedule primitive**: `Week` — a `bitflags! u8` set (`FIRST..FIFTH`) with custom serde as an int list 1..5. Enables union/difference/overlap checks in validation.
 
@@ -55,7 +56,7 @@ the bottom of `main.rs`, and `i18n.rs` has its own.
 
 **CGI / FCGI / SCGI** (`transport.rs`) share one manual router `route_cgi`: `path.trim_end_matches('/')` matched against `/lang/*`, `/theme/*` (303 + `Set-Cookie`), `/admin` (POST→JSON or form, GET→HTML), `/home.json`, `/admin.json`, else home. Transport drivers: `cgi_run` (`cegla_cgi::server::handle_request`), `fcgi_run` (`TcpListener` + `cegla_fcgi::server::server_handle_fcgi`), `scgi_run` (`server_handle_scgi`); all load `State` then call `route_cgi`. Body read via generic `read_body_capped<B>`. Responses are `http::Response<BoxBody<Bytes, io::Error>>` built by `respond`/`respond_json`/`redirect`.
 
-**Static assets**: none served — `style.min.css`/`dark.min.css` are inlined in `Page::fmt` (`views.rs`) and `admin.min.js` in `AdminFormHtml::fmt` via `include_str!`.
+**Static assets**: none served — `style.min.css`/`dark.min.css` are inlined in `Page::fmt` (`views.rs`) and `admin.min.js` in `AdminFormHtml::fmt` via `include_str!`. `Page::fmt` also appends the optional `custom_js` config value (inline script or `<script src>`) as the last element before `</body>`.
 
 ## 4. Data flow
 
@@ -72,6 +73,7 @@ the bottom of `main.rs`, and `i18n.rs` has its own.
 - **`timezone` + `pickup_time`** (IANA name + naive `HH:MM`) rather than a fixed offset: servers usually run UTC, schedule is wall-clock local time.
 - **Old-format auto-migration**: new `Db` tried first, `DbOld` fallback expanded to full-week entries and rewritten in place (backward compatibility).
 - **JSON vs form POST on one endpoint**: `body_is_json` sniffs Content-Type or a leading `{`, giving a machine full-replace API while keeping the JS-free form path.
+- **`custom_js`** (optional `Db`/`State` field): appended by `Page::fmt` as the last element before `</body>`. `script_url` treats a value as a URL (`<script src>`) when it is `http://`, `https://`, `//host/…`, or a single-token relative reference free of JS punctuation; everything else is inline `<script>` code, minified by `minify::minify_js` (oxc, same pipeline as `build.rs`) with a fallback to the trimmed source when it does not parse. Exposed as a textarea in the backoffice and as `custom_js` in the `admin.json` read/write API; `validate_and_save` stores it trimmed and writes `null` when blank.
 
 ## 6. External dependencies
 
@@ -86,7 +88,8 @@ the bottom of `main.rs`, and `i18n.rs` has its own.
 | `serde` / `serde_json` / `toml` | (De)serialization |
 | `http` / `http-body-util` / `bytes` | Shared request/response types + boxed body |
 | `form_urlencoded` | URL-encoded form parsing |
-| `lightningcss`, `oxc_*` (build-dep) | Minify CSS/JS into `$OUT_DIR` |
+| `lightningcss` (build-dep) | Minify CSS into `$OUT_DIR` |
+| `oxc_*` (dep + build-dep) | Minify JS: `admin.js` at build time (`build.rs`) and inline `custom_js` at request time (`minify.rs`) |
 
 ## 7. Entry points / execution modes
 

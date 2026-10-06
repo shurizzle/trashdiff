@@ -167,6 +167,7 @@ pub fn route_cgi(
                             T::TitleAdmin,
                             AdminFormHtml(form, FormErrors::default()),
                             theme,
+                            st.custom_js.clone(),
                         ),
                     ))
                     .to_string();
@@ -176,7 +177,12 @@ pub fn route_cgi(
                 Err((form, errs)) => {
                     let html = Localized::from((
                         lng,
-                        Page(T::TitleAdmin, AdminFormHtml(form, errs), theme),
+                        Page(
+                            T::TitleAdmin,
+                            AdminFormHtml(form, errs),
+                            theme,
+                            st.custom_js.clone(),
+                        ),
                     ))
                     .to_string();
                     respond(StatusCode::BAD_REQUEST, html)
@@ -189,6 +195,7 @@ pub fn route_cgi(
                 T::TitleAdmin,
                 AdminFormHtml(admin_form_from_state(st), FormErrors::default()),
                 theme,
+                st.custom_js.clone(),
             ),
         ))
         .to_string();
@@ -201,7 +208,11 @@ pub fn route_cgi(
         return respond_json(serde_json::to_string(&admin_json(st)).unwrap());
     }
     let view = home_view(st, Utc::now());
-    let html = Localized::from((lng, Page(T::TitleHome, HomeHtml(&view), theme))).to_string();
+    let html = Localized::from((
+        lng,
+        Page(T::TitleHome, HomeHtml(&view), theme, st.custom_js.clone()),
+    ))
+    .to_string();
     respond(StatusCode::OK, html)
 }
 

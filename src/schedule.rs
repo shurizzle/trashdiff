@@ -135,6 +135,8 @@ pub struct Db {
     pub schedule: Vec<Entry>,
     #[serde(default)]
     pub default_lang: Option<Lang>,
+    #[serde(default)]
+    pub custom_js: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -159,6 +161,7 @@ fn default_db() -> Db {
         pickup_time: "05:00".to_string(),
         schedule: Vec::new(),
         default_lang: None,
+        custom_js: None,
     }
 }
 
@@ -177,6 +180,7 @@ fn migrate_old(old: DbOld) -> Db {
         pickup_time: old.pickup_time,
         schedule,
         default_lang: None,
+        custom_js: None,
     }
 }
 
@@ -190,6 +194,7 @@ pub struct State {
     pub pickup_time: NaiveTime,
     pub schedule: Vec<Entry>,
     pub default_lang: Option<Lang>,
+    pub custom_js: Option<String>,
 }
 
 impl State {
@@ -234,6 +239,7 @@ impl State {
             pickup_time,
             schedule: db.schedule,
             default_lang: db.default_lang,
+            custom_js: db.custom_js,
         })
     }
 
