@@ -145,6 +145,7 @@ mod tests {
     use bytes::Bytes;
     use chrono::{DateTime, NaiveTime, Utc, Weekday};
     use chrono_tz::Tz;
+    use ecow::EcoString;
     #[cfg(feature = "scgi")]
     use http_body_util::BodyExt;
     #[cfg(any(feature = "fcgi", feature = "scgi"))]
@@ -163,12 +164,12 @@ mod tests {
             Entry {
                 day: "monday".to_string(),
                 weeks: w(&[1]),
-                kind: "Carta".to_string(),
+                kind: "Carta".into(),
             },
             Entry {
                 day: "tuesday".to_string(),
                 weeks: w(&[1]),
-                kind: "Umido".to_string(),
+                kind: "Umido".into(),
             },
         ];
         State {
@@ -231,8 +232,8 @@ mod tests {
                     T::TitleHome,
                     T::Save,
                     Theme::Auto,
-                    js.map(str::to_string),
-                    css.map(str::to_string),
+                    js.map(EcoString::from),
+                    css.map(EcoString::from),
                 ),
             ))
             .to_string()
@@ -322,11 +323,11 @@ mod tests {
         st.schedule.push(Entry {
             day: "monday".to_string(),
             weeks: w(&[2]),
-            kind: "Plastica".to_string(),
+            kind: "Plastica".into(),
         });
         st.default_lang = Some(Lang::En);
-        st.custom_js = Some("alert(1)".to_string());
-        st.custom_css = Some("body{color:red}".to_string());
+        st.custom_js = Some("alert(1)".into());
+        st.custom_css = Some("body{color:red}".into());
         let json = serde_json::to_value(admin_json(&st)).unwrap();
         assert_eq!(json["timezone"], "Europe/Rome");
         assert_eq!(json["pickup_time"], "17:00");
@@ -397,7 +398,7 @@ mod tests {
         st.schedule = vec![Entry {
             day: "monday".to_string(),
             weeks: w(&[2]),
-            kind: "Carta".to_string(),
+            kind: "Carta".into(),
         }];
         // 2024-01-01 is Monday of week 1: not collected -> pause
         let (d, _wd, t) = st.next_boundary(at("2024-01-01", "10:00", &st));
@@ -411,68 +412,68 @@ mod tests {
 
     #[test]
     fn overlap_rejected() {
-        let f = AdminForm {
+        let mut f = AdminForm {
             timezone: "Europe/Rome".to_string(),
             pickup_time: "17:00".to_string(),
             entries: vec![
                 Entry {
                     day: "monday".to_string(),
                     weeks: w(&[1, 2]),
-                    kind: "Carta".to_string(),
+                    kind: "Carta".into(),
                 },
                 Entry {
                     day: "monday".to_string(),
                     weeks: w(&[2, 3]),
-                    kind: "Plastica".to_string(),
+                    kind: "Plastica".into(),
                 },
             ],
             action: "save".to_string(),
             default_lang: String::new(),
-            custom_js: String::new(),
-            custom_css: String::new(),
+            custom_js: EcoString::new(),
+            custom_css: EcoString::new(),
         };
-        let errs = validate_and_save(&PathBuf::from("/nonexistent"), &f, Lang::It).unwrap_err();
+        let errs = validate_and_save(&PathBuf::from("/nonexistent"), &mut f, Lang::It).unwrap_err();
         assert!(errs.fields.contains_key("monday:1"));
         assert_eq!(errs.bad_weeks.get(&("monday", 1)), Some(&week_of(2)));
     }
 
     #[test]
     fn empty_type_rejected() {
-        let f = AdminForm {
+        let mut f = AdminForm {
             timezone: "Europe/Rome".to_string(),
             pickup_time: "17:00".to_string(),
             entries: vec![
                 Entry {
                     day: "monday".to_string(),
                     weeks: w(&[1]),
-                    kind: "Carta".to_string(),
+                    kind: "Carta".into(),
                 },
                 Entry {
                     day: "monday".to_string(),
                     weeks: w(&[2]),
-                    kind: String::new(),
+                    kind: EcoString::new(),
                 },
             ],
             action: "save".to_string(),
             default_lang: String::new(),
-            custom_js: String::new(),
-            custom_css: String::new(),
+            custom_js: EcoString::new(),
+            custom_css: EcoString::new(),
         };
-        let errs = validate_and_save(&PathBuf::from("/nonexistent"), &f, Lang::It).unwrap_err();
+        let errs = validate_and_save(&PathBuf::from("/nonexistent"), &mut f, Lang::It).unwrap_err();
         assert!(errs.fields.contains_key("monday:1"));
         assert!(errs.bad_weeks.is_empty());
         // zero weeks but empty type: row ignored, no error
-        let f2 = AdminForm {
+        let mut f2 = AdminForm {
             entries: vec![Entry {
                 day: "monday".to_string(),
                 weeks: Week::empty(),
-                kind: String::new(),
+                kind: EcoString::new(),
             }],
             ..f
         };
         let path =
             std::env::temp_dir().join(format!("trashdiff_empty_type_{}", std::process::id()));
-        assert!(validate_and_save(&path, &f2, Lang::It).is_ok());
+        assert!(validate_and_save(&path, &mut f2, Lang::It).is_ok());
         std::fs::remove_file(&path).ok();
     }
 
@@ -849,27 +850,27 @@ mod tests {
     #[test]
     fn custom_resources_roundtrip_through_admin_form() {
         let db = temp_db();
-        let f = AdminForm {
+        let mut f = AdminForm {
             timezone: "Europe/Rome".to_string(),
             pickup_time: "17:00".to_string(),
             entries: Vec::new(),
             action: "save".to_string(),
             default_lang: String::new(),
-            custom_js: "  console.log('x');\n".to_string(),
-            custom_css: "  body { color: red; }\n".to_string(),
+            custom_js: "  console.log('x');\n".into(),
+            custom_css: "  body { color: red; }\n".into(),
         };
-        validate_and_save(&db, &f, Lang::En).unwrap();
+        validate_and_save(&db, &mut f, Lang::En).unwrap();
         let st = State::load(db.clone()).unwrap();
         // stored trimmed; minified only when rendered
         assert_eq!(st.custom_js.as_deref(), Some("console.log('x');"));
         assert_eq!(st.custom_css.as_deref(), Some("body { color: red; }"));
         // empty textareas clear both keys
-        let f = AdminForm {
-            custom_js: String::new(),
-            custom_css: String::new(),
+        let mut f = AdminForm {
+            custom_js: EcoString::new(),
+            custom_css: EcoString::new(),
             ..f
         };
-        validate_and_save(&db, &f, Lang::En).unwrap();
+        validate_and_save(&db, &mut f, Lang::En).unwrap();
         let st = State::load(db.clone()).unwrap();
         assert_eq!(st.custom_js, None);
         assert_eq!(st.custom_css, None);

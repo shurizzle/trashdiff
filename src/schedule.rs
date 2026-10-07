@@ -3,11 +3,11 @@ use std::fmt;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use bitflags::bitflags;
 use chrono::{DateTime, Datelike, Duration, NaiveTime, Weekday};
 use chrono_tz::Tz;
+use ecow::EcoString;
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize};
 
@@ -117,13 +117,6 @@ pub fn day_index(wd: Weekday) -> usize {
     wd.num_days_from_monday() as usize
 }
 
-pub fn day_index_of(day: &str) -> usize {
-    DAY_KEYS
-        .iter()
-        .position(|d| *d == day)
-        .unwrap_or(DAY_KEYS.len())
-}
-
 pub fn sort_key(e: &Entry) -> (bool, u32) {
     (e.weeks.is_empty(), e.weeks.bits().trailing_zeros())
 }
@@ -137,9 +130,9 @@ pub struct Db {
     #[serde(default)]
     pub default_lang: Option<Lang>,
     #[serde(default)]
-    pub custom_js: Option<Arc<str>>,
+    pub custom_js: Option<EcoString>,
     #[serde(default)]
-    pub custom_css: Option<Arc<str>>,
+    pub custom_css: Option<EcoString>,
 }
 
 #[derive(Deserialize)]
@@ -147,7 +140,7 @@ pub struct DbOld {
     timezone: String,
     pickup_time: String,
     #[serde(default)]
-    schedule: HashMap<String, Arc<str>>,
+    schedule: HashMap<String, EcoString>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -155,7 +148,7 @@ pub struct Entry {
     pub day: String,
     pub weeks: Week,
     #[serde(rename = "type")]
-    pub kind: Arc<str>,
+    pub kind: EcoString,
 }
 
 fn default_db() -> Db {
@@ -199,8 +192,8 @@ pub struct State {
     pub pickup_time: NaiveTime,
     pub schedule: Vec<Entry>,
     pub default_lang: Option<Lang>,
-    pub custom_js: Option<Arc<str>>,
-    pub custom_css: Option<Arc<str>>,
+    pub custom_js: Option<EcoString>,
+    pub custom_css: Option<EcoString>,
 }
 
 impl State {

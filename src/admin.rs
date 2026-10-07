@@ -1,20 +1,20 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use chrono::NaiveTime;
 use chrono_tz::Tz;
+use ecow::EcoString;
 use serde::Deserialize;
 
 use crate::i18n::{Lang, Localized, T, days_full};
-use crate::schedule::{DAY_KEYS, Db, Entry, State, Week, day_index_of, sort_key, week_of};
+use crate::schedule::{DAY_KEYS, Db, Entry, State, Week, sort_key, week_of};
 use crate::views::{AdminForm, FormErrors};
 
 #[derive(Deserialize)]
 struct WriteRow {
     weeks: Week,
     #[serde(rename = "type")]
-    kind: Arc<str>,
+    kind: EcoString,
 }
 
 #[derive(Deserialize)]
@@ -23,9 +23,9 @@ struct AdminWrite {
     pickup_time: String,
     default_lang: Option<Lang>,
     #[serde(default)]
-    custom_js: Option<Arc<str>>,
+    custom_js: Option<EcoString>,
     #[serde(default)]
-    custom_css: Option<Arc<str>>,
+    custom_css: Option<EcoString>,
     schedule: [Vec<WriteRow>; 7],
 }
 
@@ -111,7 +111,28 @@ pub fn body_is_json(ct: Option<&str>, body: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
-pub fn validate_and_save(db_path: &PathBuf, f: &AdminForm, lng: Lang) -> Result<(), FormErrors> {
+fn ecotrim(mut s: EcoString) -> EcoString {
+    let ts = s.trim();
+    if ts.is_empty() {
+        s.clear();
+        return s;
+    }
+    if ts.len() == s.len() {
+        return s;
+    }
+
+    let off = ts.as_ptr().addr() - s.as_ptr().addr();
+    let len = ts.len();
+    unsafe { std::ptr::copy(s.as_ptr().add(off), s.make_mut().as_mut_ptr(), len) };
+    s.truncate(len);
+    s
+}
+
+pub fn validate_and_save(
+    db_path: &PathBuf,
+    f: &mut AdminForm,
+    lng: Lang,
+) -> Result<(), FormErrors> {
     let mut errs = FormErrors::default();
     if let Err(e) = f.timezone.parse::<Tz>() {
         errs.fields.insert(
@@ -139,14 +160,33 @@ pub fn validate_and_save(db_path: &PathBuf, f: &AdminForm, lng: Lang) -> Result<
     };
     let mut schedule: Vec<Entry> = Vec::new();
     let mut seen: HashSet<(String, u32)> = HashSet::new();
-    for day in DAY_KEYS {
-        let mut day_entries: Vec<&Entry> = f.entries.iter().filter(|e| e.day == *day).collect();
+    let mut day_entries: Vec<&mut Entry> = Vec::new();
+    for (di, day) in DAY_KEYS.iter().enumerate() {
+        // Gather mutable refs to the entries of the current day so they can be
+        // sorted and validated below. `day_entries` is declared once outside
+        // the loop and reused (cleared, not reallocated) each iteration to
+        // avoid a heap alloc/free per day; because it is emptied at the end of
+        // every iteration, at this point it holds no live borrows of
+        // `f.entries`.
+        //
+        // SAFETY: the raw-pointer reborrow only extends the mutable borrow of
+        // `f.entries` for the duration of this statement. The pushed `&mut`
+        // refs point into the vector's heap buffer, and the vector is never
+        // structurally mutated (push/remove/realloc) while they are alive:
+        // `iter_mut`/`filter`/`for_each` only touch elements, and the refs are
+        // dropped by `day_entries.clear()` before the next reborrow. The
+        // element refs therefore remain valid and unique.
+        unsafe { &mut *(&mut f.entries as *mut Vec<Entry>) }
+            .iter_mut()
+            .filter(|e| e.day == *day)
+            .for_each(|e| day_entries.push(e));
         day_entries.sort_by_key(|e| sort_key(e));
-        for (idx, e) in day_entries.iter().enumerate() {
-            let di = day_index_of(day);
+
+        for (idx, e) in day_entries.iter_mut().enumerate() {
             let weeks = e.weeks;
             if !weeks.is_empty() {
-                if e.kind.trim().is_empty() {
+                e.kind = ecotrim(std::mem::take(&mut e.kind));
+                if e.kind.is_empty() {
                     let key = format!("{day}:{idx}");
                     errs.fields
                         .insert(key, Localized::from((lng, T::ErrType)).to_string());
@@ -170,11 +210,17 @@ pub fn validate_and_save(db_path: &PathBuf, f: &AdminForm, lng: Lang) -> Result<
                 schedule.push(Entry {
                     day: e.day.clone(),
                     weeks,
-                    kind: e.kind.trim().into(),
+                    kind: e.kind.clone(),
                 });
             }
         }
+
+        // Ends the borrows into `f.entries` taken at the top of the iteration
+        // (the `&mut Entry`s are dropped here), so the next day can reborrow
+        // the vector. `clear` keeps the allocated capacity for reuse.
+        day_entries.clear();
     }
+    drop(day_entries);
     if !errs.fields.is_empty() || !errs.bad_weeks.is_empty() {
         return Err(errs);
     }
@@ -220,7 +266,7 @@ pub fn process_admin(
         f.entries.push(Entry {
             day: day.to_string(),
             weeks: Week::all().difference(covered),
-            kind: Arc::from(""),
+            kind: EcoString::new(),
         });
         return Ok(Some(f));
     }
@@ -238,7 +284,7 @@ pub fn process_admin(
         });
         return Ok(Some(f));
     }
-    match validate_and_save(db_path, &f, lng) {
+    match validate_and_save(db_path, &mut f, lng) {
         Ok(()) => Ok(None),
         Err(errs) => Err((f, errs)),
     }
