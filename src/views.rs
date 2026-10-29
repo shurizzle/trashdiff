@@ -521,7 +521,9 @@ impl LocalizedDisplay for AdminFormHtml {
     fn fmt(&self, lng: Lang, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("<h1>")?;
         fmt::Display::fmt(&esc(Localized::from((lng, T::TitleAdmin))), f)?;
-        f.write_str("</h1>")?;
+        f.write_str("</h1><p class=\"ver\">trashdiff ")?;
+        f.write_str(env!("CARGO_PKG_VERSION"))?;
+        f.write_str("</p>")?;
         if let Some(form_err) = self.1.fields.get("form") {
             f.write_str("<p class=\"err\">")?;
             fmt::Display::fmt(&esc(form_err), f)?;
