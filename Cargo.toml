@@ -1,6 +1,6 @@
 [package]
 name = "trashdiff"
-version = "0.5.3"
+version = "0.6.0"
 edition = "2024"
 license = "MIT"
 description = "Weekly waste collection schedule with http/cgi/fcgi/scgi/mcp frontends"
@@ -36,7 +36,14 @@ oxc_parser = "0.156"
 oxc_span = "0.156"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-std", "io-util", "net", "macros"], optional = true }
+tokio = { version = "1", features = [
+  "rt",
+  "rt-multi-thread",
+  "io-std",
+  "io-util",
+  "net",
+  "macros",
+], optional = true }
 toml = "1.1"
 
 [build-dependencies]
