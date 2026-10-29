@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 mod admin;
+mod auth;
 mod i18n;
 #[cfg(feature = "mcp")]
 mod mcp;
@@ -150,6 +151,7 @@ fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use crate::admin::*;
+    use crate::auth::Auth;
     use crate::i18n::{Lang, Localized, T};
     use crate::minify::{minify_css, minify_js};
     use crate::schedule::*;
@@ -176,6 +178,16 @@ mod tests {
 
     fn state() -> State {
         state_with_db(PathBuf::from("/nonexistent"))
+    }
+
+    fn auth() -> Auth {
+        Auth::new(Some("pw".to_string()))
+    }
+
+    fn basic(password: &str) -> String {
+        use base64::Engine;
+        use base64::engine::general_purpose::STANDARD;
+        format!("Basic {}", STANDARD.encode(format!("user:{password}")))
     }
 
     fn state_with_db(db_path: PathBuf) -> State {
@@ -550,7 +562,16 @@ mod tests {
                     let resp: Result<
                         http::Response<BoxBody<Bytes, std::io::Error>>,
                         std::io::Error,
-                    > = Ok(route_cgi(&st, lng, theme, &method, &path, &headers, body));
+                    > = Ok(route_cgi(
+                        &st,
+                        &auth(),
+                        lng,
+                        theme,
+                        &method,
+                        &path,
+                        &headers,
+                        body,
+                    ));
                     resp
                 }
             })
@@ -633,7 +654,16 @@ mod tests {
                     let resp: Result<
                         http::Response<BoxBody<Bytes, std::io::Error>>,
                         std::io::Error,
-                    > = Ok(route_cgi(&st, lng, theme, &method, &path, &headers, body));
+                    > = Ok(route_cgi(
+                        &st,
+                        &auth(),
+                        lng,
+                        theme,
+                        &method,
+                        &path,
+                        &headers,
+                        body,
+                    ));
                     resp
                 }
             })
@@ -655,10 +685,12 @@ mod tests {
             .await
             .unwrap();
         let mut params = Vec::new();
+        let auth = basic("pw");
         for (k, v) in [
             ("REQUEST_METHOD", "POST"),
             ("REQUEST_URI", "/admin"),
             ("CONTENT_LENGTH", &body.len().to_string()),
+            ("HTTP_AUTHORIZATION", auth.as_str()),
         ] {
             params.extend_from_slice(
                 &NameValuePair::new(k.as_bytes().to_vec(), v.as_bytes().to_vec()).encode(),
@@ -738,7 +770,16 @@ mod tests {
         let body = read_body_capped(request.into_body(), content_length).await?;
         let lng = lang_from_headers(&headers, st);
         let theme = theme_from_headers(&headers);
-        Ok(route_cgi(st, lng, theme, &method, &path, &headers, body))
+        Ok(route_cgi(
+            st,
+            &auth(),
+            lng,
+            theme,
+            &method,
+            &path,
+            &headers,
+            body,
+        ))
     }
 
     #[cfg(feature = "scgi")]
@@ -783,11 +824,13 @@ mod tests {
         });
         let (mut reader, mut writer) = tokio::io::split(client_io);
         let body = b"pickup_time=19:30&timezone=Nope&day_monday=X";
+        let auth = basic("pw");
         let netstring = scgi_netstring(
             &[
                 ("REQUEST_METHOD", "POST"),
                 ("REQUEST_URI", "/admin"),
                 ("CONTENT_LENGTH", &body.len().to_string()),
+                ("HTTP_AUTHORIZATION", auth.as_str()),
             ],
             body,
         );
@@ -820,6 +863,7 @@ mod tests {
                 ("REQUEST_METHOD", "POST"),
                 ("REQUEST_URI", "/admin"),
                 ("CONTENT_LENGTH", &body.len().to_string()),
+                ("HTTP_AUTHORIZATION", "Bearer pw"),
             ],
             body,
         );
@@ -910,6 +954,80 @@ mod tests {
         }
     }
 
+    #[cfg(any(feature = "cgi", feature = "fcgi", feature = "scgi"))]
+    #[test]
+    fn route_cgi_gates_admin_per_scheme() {
+        use bytes::Bytes;
+        let db = temp_db();
+        let st = state_with_db(db.clone());
+        let auth = auth();
+        let basic_auth = basic("pw");
+        let run = |method: http::Method, path: &str, cred: Option<&str>, body: &[u8]| {
+            let mut headers = http::HeaderMap::new();
+            if let Some(v) = cred {
+                headers.insert(
+                    http::header::AUTHORIZATION,
+                    http::HeaderValue::from_str(v).unwrap(),
+                );
+            }
+            let resp = route_cgi(
+                &st,
+                &auth,
+                Lang::En,
+                Theme::Auto,
+                &method,
+                path,
+                &headers,
+                Bytes::from(body.to_vec()),
+            );
+            (
+                resp.status(),
+                resp.headers().get("WWW-Authenticate").cloned(),
+            )
+        };
+
+        // Backoffice page: Basic only.
+        assert_eq!(run(http::Method::GET, "/admin", None, b"").0, 401);
+        assert_eq!(
+            run(http::Method::GET, "/admin", Some("Bearer pw"), b"").0,
+            401
+        );
+        assert_eq!(
+            run(http::Method::GET, "/admin", Some(&basic_auth), b"").0,
+            200
+        );
+
+        // JSON write API: Bearer only.
+        let json = br#"{"timezone":"Europe/Rome","pickup_time":"08:00","schedule":[[],[],[],[],[],[],[]]}"#;
+        let (status, challenge) = run(http::Method::POST, "/admin", None, json);
+        assert_eq!(status, 401);
+        assert_eq!(challenge.unwrap(), "Bearer realm=\"trashdiff\"");
+        assert_eq!(
+            run(http::Method::POST, "/admin", Some(&basic_auth), json).0,
+            401
+        );
+        assert_eq!(
+            run(http::Method::POST, "/admin", Some("Bearer pw"), json).0,
+            200
+        );
+
+        // HTML form: Basic only.
+        let form = b"pickup_time=19:30&timezone=Nope";
+        let (status, _) = run(http::Method::POST, "/admin", Some("Bearer pw"), form);
+        assert_eq!(status, 401);
+        assert_eq!(
+            run(http::Method::POST, "/admin", Some(&basic_auth), form).0,
+            400
+        );
+
+        // Public reads stay open.
+        assert_eq!(run(http::Method::GET, "/", None, b"").0, 200);
+        assert_eq!(run(http::Method::GET, "/home.json", None, b"").0, 200);
+        assert_eq!(run(http::Method::GET, "/admin.json", None, b"").0, 200);
+
+        let _ = std::fs::remove_file(&db);
+    }
+
     #[test]
     fn body_is_json_detects_ct_and_brace() {
         assert!(body_is_json(Some("application/json"), b"x"));
@@ -968,13 +1086,15 @@ mod tests {
         assert_eq!(
             handle(
                 &db,
-                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                false,
             ),
             None
         );
         let init = handle(
             &db,
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+            false,
         )
         .unwrap();
         assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
@@ -984,7 +1104,12 @@ mod tests {
             serde_json::json!({})
         );
 
-        let list = handle(&db, r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).unwrap();
+        let list = handle(
+            &db,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+            false,
+        )
+        .unwrap();
         let names: Vec<&str> = list["result"]["tools"]
             .as_array()
             .unwrap()
@@ -993,12 +1118,51 @@ mod tests {
             .collect();
         assert_eq!(names, ["what_to_throw", "schedule_read", "schedule_write"]);
 
-        let bad = handle(&db, r#"{"jsonrpc":"2.0","id":3,"method":"nope"}"#).unwrap();
+        let bad = handle(&db, r#"{"jsonrpc":"2.0","id":3,"method":"nope"}"#, false).unwrap();
         assert_eq!(bad["error"]["code"], -32601);
-        let garbage = handle(&db, "{").unwrap();
+        let garbage = handle(&db, "{", false).unwrap();
         assert_eq!(garbage["error"]["code"], -32700);
-        let unknown = handle(&db, &mcp_call(4, "nope", serde_json::json!({}))).unwrap();
+        let unknown = handle(&db, &mcp_call(4, "nope", serde_json::json!({})), false).unwrap();
         assert_eq!(unknown["error"]["code"], -32602);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn mcp_write_requires_auth() {
+        use crate::mcp::{handle, is_write_request};
+        let db = mcp_db("unauth");
+        let call = mcp_call(
+            1,
+            "schedule_write",
+            serde_json::json!({
+                "timezone": "Europe/Rome",
+                "pickup_time": "09:00",
+                "schedule": [[],[],[],[],[],[],[]]
+            }),
+        );
+        assert!(is_write_request(&call));
+        assert!(!is_write_request(&mcp_call(
+            2,
+            "schedule_read",
+            serde_json::json!({})
+        )));
+        assert!(!is_write_request("{"));
+
+        let refused = handle(&db, &call, false).unwrap();
+        assert_eq!(refused["error"]["code"], -32001);
+        assert!(!db.exists(), "unauthorized write must not create the file");
+
+        let read = handle(
+            &db,
+            &mcp_call(3, "schedule_read", serde_json::json!({})),
+            false,
+        )
+        .unwrap();
+        assert!(read["result"].get("isError").is_none());
+
+        let ok = handle(&db, &call, true).unwrap();
+        assert!(ok["result"].get("isError").is_none());
         let _ = std::fs::remove_file(&db);
     }
 
@@ -1008,7 +1172,12 @@ mod tests {
         use crate::mcp::handle;
         let db = mcp_db("write");
 
-        let read = handle(&db, &mcp_call(1, "schedule_read", serde_json::json!({}))).unwrap();
+        let read = handle(
+            &db,
+            &mcp_call(1, "schedule_read", serde_json::json!({})),
+            true,
+        )
+        .unwrap();
         let text = read["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("Europe/Rome"));
         assert!(text.contains("\"pickup_time\": \"05:00\""));
@@ -1021,7 +1190,7 @@ mod tests {
             "custom_css": null,
             "schedule": [[{"weeks":[1,3],"type":"Carta"}],[],[],[],[],[],[]]
         });
-        let saved = handle(&db, &mcp_call(2, "schedule_write", args)).unwrap();
+        let saved = handle(&db, &mcp_call(2, "schedule_write", args), true).unwrap();
         assert!(saved["result"].get("isError").is_none());
         let st = State::load(db.clone()).unwrap();
         assert_eq!(st.pickup_time.format("%H:%M").to_string(), "07:30");
@@ -1036,7 +1205,7 @@ mod tests {
                 [],[],[],[],[],[]
             ]
         });
-        let bad = handle(&db, &mcp_call(3, "schedule_write", overlap)).unwrap();
+        let bad = handle(&db, &mcp_call(3, "schedule_write", overlap), true).unwrap();
         assert_eq!(bad["result"]["isError"], true);
         let text = bad["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("overlaps"));
@@ -1051,7 +1220,10 @@ mod tests {
         let db = mcp_db("http");
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(AppState(db.clone())))
+                .app_data(web::Data::new(AppState {
+                    db: db.clone(),
+                    auth: auth(),
+                }))
                 .route("/mcp", web::post().to(mcp_post))
                 .route("/mcp", web::get().to(mcp_no_stream)),
         )
@@ -1095,6 +1267,148 @@ mod tests {
             test::call_service(&app, get).await.status(),
             actix_web::http::StatusCode::METHOD_NOT_ALLOWED
         );
+
+        let write = mcp_call(
+            2,
+            "schedule_write",
+            serde_json::json!({
+                "timezone": "Europe/Rome",
+                "pickup_time": "09:00",
+                "schedule": [[],[],[],[],[],[],[]]
+            }),
+        );
+        let req = test::TestRequest::post()
+            .uri("/mcp")
+            .insert_header(("content-type", "application/json"))
+            .set_payload(write.clone())
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 401);
+        assert_eq!(
+            resp.headers().get("www-authenticate").unwrap(),
+            "Bearer realm=\"trashdiff\""
+        );
+
+        let req = test::TestRequest::post()
+            .uri("/mcp")
+            .insert_header(("content-type", "application/json"))
+            .insert_header(("authorization", "Bearer pw"))
+            .set_payload(write)
+            .to_request();
+        let raw = test::read_body(test::call_service(&app, req).await).await;
+        let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert!(v["result"].get("isError").is_none());
+
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[cfg(feature = "http")]
+    #[actix_web::test]
+    async fn admin_post_requires_password() {
+        use crate::web::{AppState, admin_get, admin_post};
+        use actix_web::{App, test, web};
+        let db = temp_db();
+        let json = br#"{"timezone":"Europe/Rome","pickup_time":"08:00","schedule":[[],[],[],[],[],[],[]]}"#;
+        let form = b"pickup_time=19:30&timezone=Nope";
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(AppState {
+                    db: db.clone(),
+                    auth: auth(),
+                }))
+                .route("/admin", web::get().to(admin_get))
+                .route("/admin", web::post().to(admin_post)),
+        )
+        .await;
+
+        let post = |ct: &str, body: &[u8], auth: Option<&str>| {
+            let mut req = test::TestRequest::post()
+                .uri("/admin")
+                .insert_header(("content-type", ct));
+            if let Some(v) = auth {
+                req = req.insert_header(("authorization", v.to_string()));
+            }
+            req.set_payload(body.to_vec()).to_request()
+        };
+        let challenge = |resp: &actix_web::dev::ServiceResponse| {
+            resp.headers()
+                .get("www-authenticate")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+
+        // JSON write API: Bearer only.
+        let resp = test::call_service(&app, post("application/json", json, None)).await;
+        assert_eq!(resp.status(), 401);
+        assert!(challenge(&resp).starts_with("Bearer"));
+        assert!(!db.exists(), "unauthorized write must not create the file");
+        assert_eq!(
+            test::call_service(&app, post("application/json", json, Some(&basic("pw"))))
+                .await
+                .status(),
+            401
+        );
+        assert_eq!(
+            test::call_service(&app, post("application/json", json, Some("Bearer wrong")))
+                .await
+                .status(),
+            401
+        );
+        assert!(!db.exists());
+        assert_eq!(
+            test::call_service(&app, post("application/json", json, Some("Bearer pw")))
+                .await
+                .status(),
+            200
+        );
+        assert!(db.exists());
+
+        // HTML form: Basic only.
+        let resp = test::call_service(
+            &app,
+            post("application/x-www-form-urlencoded", form, Some("Bearer pw")),
+        )
+        .await;
+        assert_eq!(resp.status(), 401);
+        assert!(challenge(&resp).starts_with("Basic"));
+        let resp = test::call_service(
+            &app,
+            post(
+                "application/x-www-form-urlencoded",
+                form,
+                Some(&basic("pw")),
+            ),
+        )
+        .await;
+        // Authorized: reaches validation, which rejects the timezone.
+        assert_eq!(resp.status(), 400);
+
+        // The backoffice page itself: Basic only.
+        let get = |auth: Option<&str>| {
+            let mut req = test::TestRequest::get().uri("/admin");
+            if let Some(v) = auth {
+                req = req.insert_header(("authorization", v.to_string()));
+            }
+            req.to_request()
+        };
+        let resp = test::call_service(&app, get(None)).await;
+        assert_eq!(resp.status(), 401);
+        assert!(challenge(&resp).starts_with("Basic"));
+        assert_eq!(
+            test::call_service(&app, get(Some("Bearer pw")))
+                .await
+                .status(),
+            401
+        );
+        assert_eq!(
+            test::call_service(&app, get(Some(&basic("pw"))))
+                .await
+                .status(),
+            200
+        );
+
         let _ = std::fs::remove_file(&db);
     }
 }

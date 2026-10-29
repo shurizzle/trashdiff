@@ -44,6 +44,38 @@ trashdiff cli  [--db PATH]
 `--db` defaults to `trashdb.toml` and can be set via the `TRASHDIFF_DB`
 environment variable (an explicit flag wins).
 
+## Writes and authentication
+
+Public, no credentials: `/`, `/home.json`, `/admin.json` and the MCP read
+tools. The backoffice page (`GET /admin`) is protected with Basic like its
+save, and every write is password-protected and **disabled unless
+`TRASHDIFF_PASSWORD` is set** (fail closed):
+
+```sh
+TRASHDIFF_PASSWORD='change-me' trashdiff http
+```
+
+- backoffice page and form (`GET /admin`, and `POST /admin` without a JSON
+  body): **Basic only** — the browser prompts for the password (any user name,
+  the password is what counts);
+- JSON write API (`POST /admin` with a JSON body): **Bearer only** —
+  `curl -H "Authorization: Bearer $TRASHDIFF_PASSWORD"`, Basic is refused;
+- MCP writes (`schedule_write`): **Bearer only**;
+
+The scheme is enforced: a correct password under the wrong scheme is refused.
+`GET`/`POST /admin` without valid credentials answers `401` with
+`WWW-Authenticate: Basic realm="trashdiff"` (page and form) or
+`Bearer realm="trashdiff"` (JSON); an unauthenticated `schedule_write` answers
+`401` with the Bearer challenge (over stdio: JSON-RPC error `-32001`). Neither
+reads nor creates the database when refused.
+
+The password travels in clear text inside the request (Basic/Bearer are not
+encrypted by themselves): terminate TLS at the reverse proxy in front of
+trashdiff. It is read once at process start, so changing it requires a restart.
+
+For `trashdiff mcp` over stdio there is no header; the client passes the
+password in the process environment.
+
 ### http
 
 Built-in web server (actix-web). Default `http://127.0.0.1:8080`.
@@ -108,7 +140,11 @@ Two transports:
   ```json
   {
     "mcpServers": {
-      "trashdiff": { "type": "http", "url": "http://127.0.0.1:8080/mcp" }
+      "trashdiff": {
+        "type": "http",
+        "url": "http://127.0.0.1:8080/mcp",
+        "headers": { "Authorization": "Bearer change-me" }
+      }
     }
   }
   ```
@@ -120,11 +156,16 @@ Two transports:
     "mcpServers": {
       "trashdiff": {
         "command": "trashdiff",
-        "args": ["mcp", "--db", "/srv/trashdb.toml"]
+        "args": ["mcp", "--db", "/srv/trashdb.toml"],
+        "env": { "TRASHDIFF_PASSWORD": "change-me" }
       }
     }
   }
   ```
+
+`schedule_write` requires the password (see [Writes and
+authentication](#writes-and-authentication)); `what_to_throw` and
+`schedule_read` stay public.
 
 `trashdiff mcp` writes nothing to stdout except protocol frames; errors go to
 stderr and to JSON-RPC error frames.
@@ -155,14 +196,17 @@ trashdiff cli
   the `mcp` section below
 - `POST /admin` — full-replace write API: send the `admin.json` shape with
   `Content-Type: application/json` (a body starting with `{` is also
-  detected). Validated like the backoffice save (type required for the ticked
+  detected). Requires `Authorization: Bearer $TRASHDIFF_PASSWORD` (Basic is
+  refused), otherwise `401`. Validated like the backoffice save (type required for the ticked
   weeks, no overlapping `(day, week)` pairs, empty `weeks` rows dropped; on
   success returns `200` with the refreshed `admin.json`, invalid input gives
   `400` (`{"error": ...}` for parse failures, `{fields, overlaps}` for
   validation errors). Form posts are unchanged
-- `/admin` — backoffice: one row per pickup under each weekday (weekdays are
-  fixed and always shown). Tick weeks 1-5 and type the waste type; `+`
-  duplicates that weekday, `-` removes the row, no JS needed. Plus global
+- `/admin` — backoffice, password required (Basic): one row per pickup under
+  each weekday (weekdays are fixed and always shown). Tick weeks 1-5 and type the waste type; `+`
+  duplicates that weekday, `-` removes the row, no JS needed. Saving asks for
+  the password (browser dialog); without `TRASHDIFF_PASSWORD` saving is
+  disabled. Plus global
   pickup time, timezone and the custom JavaScript/CSS fields
 - `EN`/`IT` toggle — language switch, persisted in a cookie
 - Dark mode — follows the OS theme (`prefers-color-scheme`)
@@ -216,4 +260,6 @@ cargo test
 ```
 
 Window logic, CGI/FastCGI/SCGI protocol round-trips (duplex sockets, no
-web server needed) and MCP JSON-RPC framing/tools.
+web server needed), MCP JSON-RPC framing/tools and the write password gate
+(Basic/Bearer parsing, `401` without credentials, refused writes never create
+or read the database).

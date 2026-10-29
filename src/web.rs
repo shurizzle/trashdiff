@@ -7,6 +7,7 @@ use chrono::Utc;
 use crate::admin::{
     JsonWrite, WriteErrors, admin_json_write, body_is_json, form_from_body, process_admin,
 };
+use crate::auth::{Auth, Scheme};
 use crate::i18n::{Lang, Localized, T};
 use crate::schedule::State;
 use crate::views::{
@@ -27,11 +28,29 @@ fn theme_of(req: &HttpRequest) -> Theme {
     Theme::from_req(cookie)
 }
 
-pub(crate) struct AppState(pub(crate) PathBuf);
+pub(crate) struct AppState {
+    pub(crate) db: PathBuf,
+    pub(crate) auth: Auth,
+}
+
+fn authorization(req: &HttpRequest) -> Option<&str> {
+    req.headers()
+        .get(actix_web::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+}
+
+fn unauthorized(scheme: Scheme) -> HttpResponse {
+    HttpResponse::Unauthorized()
+        .insert_header((
+            "WWW-Authenticate",
+            format!("{} realm=\"trashdiff\"", scheme.name()),
+        ))
+        .finish()
+}
 
 #[allow(clippy::result_large_err)]
 fn load_or_500(data: &AppState) -> Result<State, HttpResponse> {
-    State::load(data.0.clone()).map_err(|e| {
+    State::load(data.db.clone()).map_err(|e| {
         HttpResponse::InternalServerError()
             .content_type("text/plain; charset=utf-8")
             .body(e)
@@ -93,7 +112,10 @@ fn admin_post_json(db_path: &PathBuf, lng: Lang, body: &[u8]) -> HttpResponse {
     }
 }
 
-async fn admin_get(req: HttpRequest, data: web::Data<AppState>) -> HttpResponse {
+pub(crate) async fn admin_get(req: HttpRequest, data: web::Data<AppState>) -> HttpResponse {
+    if !data.auth.allows(authorization(&req), Scheme::Basic) {
+        return unauthorized(Scheme::Basic);
+    }
     let st = match load_or_500(&data) {
         Ok(st) => st,
         Err(resp) => return resp,
@@ -117,22 +139,32 @@ async fn admin_get(req: HttpRequest, data: web::Data<AppState>) -> HttpResponse 
         )
 }
 
-async fn admin_post(req: HttpRequest, data: web::Data<AppState>, body: web::Bytes) -> HttpResponse {
+pub(crate) async fn admin_post(
+    req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Bytes,
+) -> HttpResponse {
+    let ct = req
+        .headers()
+        .get(actix_web::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok());
+    let json = body_is_json(ct, &body);
+    // The JSON write API speaks Bearer, the HTML form speaks Basic.
+    let scheme = if json { Scheme::Bearer } else { Scheme::Basic };
+    if !data.auth.allows(authorization(&req), scheme) {
+        return unauthorized(scheme);
+    }
     let st = match load_or_500(&data) {
         Ok(st) => st,
         Err(resp) => return resp,
     };
     let lng = lang_of(&req, &st);
     let theme = theme_of(&req);
-    let ct = req
-        .headers()
-        .get(actix_web::http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok());
-    if body_is_json(ct, &body) {
-        return admin_post_json(&data.0, lng, &body);
+    if json {
+        return admin_post_json(&data.db, lng, &body);
     }
     let f = form_from_body(&body);
-    match process_admin(f, &data.0, lng) {
+    match process_admin(f, &data.db, lng) {
         Ok(Some(form)) => HttpResponse::Ok()
             .content_type("text/html; charset=utf-8")
             .body(
@@ -181,9 +213,17 @@ async fn admin_json_endpoint(_req: HttpRequest, data: web::Data<AppState>) -> Ht
 }
 
 #[cfg(feature = "mcp")]
-pub(crate) async fn mcp_post(data: web::Data<AppState>, body: web::Bytes) -> HttpResponse {
+pub(crate) async fn mcp_post(
+    req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Bytes,
+) -> HttpResponse {
     let text = String::from_utf8_lossy(&body);
-    match crate::mcp::handle(&data.0, &text) {
+    let authed = data.auth.allows(authorization(&req), Scheme::Bearer);
+    if !authed && crate::mcp::is_write_request(&text) {
+        return unauthorized(Scheme::Bearer);
+    }
+    match crate::mcp::handle(&data.db, &text, authed) {
         Some(resp) => HttpResponse::Ok()
             .content_type("application/json; charset=utf-8")
             .body(resp.to_string()),
@@ -238,7 +278,9 @@ async fn switch_theme(req: HttpRequest, path: web::Path<String>) -> HttpResponse
 }
 
 pub async fn serve(bind: String, db_path: PathBuf) -> std::io::Result<()> {
-    let data = web::Data::new(AppState(db_path));
+    let auth = Auth::from_env();
+    auth.warn_if_unset();
+    let data = web::Data::new(AppState { db: db_path, auth });
     println!("trashdiff listening on http://{bind}");
     HttpServer::new(move || {
         let app = App::new()

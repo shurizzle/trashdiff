@@ -15,6 +15,7 @@ mcp = []
 
 [dependencies]
 actix-web = { version = "4", optional = true }
+base64 = "0.23"
 bitflags = "2.13.1"
 bytes = "1"
 cegla-cgi = { version = "0.2.3", features = ["server"], optional = true }

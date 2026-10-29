@@ -19,6 +19,8 @@ use crate::admin::{
     JsonWrite, WriteErrors, admin_json_write, body_is_json, form_from_body, process_admin,
 };
 #[cfg(any(feature = "cgi", feature = "fcgi", feature = "scgi"))]
+use crate::auth::{Auth, Scheme};
+#[cfg(any(feature = "cgi", feature = "fcgi", feature = "scgi"))]
 use crate::views::{
     AdminFormHtml, FormErrors, HomeHtml, Page, Theme, admin_form_from_state, admin_json, home_view,
 };
@@ -86,8 +88,22 @@ fn redirect(
 }
 
 #[cfg(any(feature = "cgi", feature = "fcgi", feature = "scgi"))]
+fn respond_unauthorized(scheme: Scheme) -> http::Response<BoxBody<Bytes, std::io::Error>> {
+    http::Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header(
+            "WWW-Authenticate",
+            format!("{} realm=\"trashdiff\"", scheme.name()),
+        )
+        .body(boxed_body(Bytes::new()))
+        .unwrap()
+}
+
+#[cfg(any(feature = "cgi", feature = "fcgi", feature = "scgi"))]
+#[allow(clippy::too_many_arguments)]
 pub fn route_cgi(
     st: &State,
+    auth: &Auth,
     lng: Lang,
     theme: Theme,
     method: &Method,
@@ -137,7 +153,18 @@ pub fn route_cgi(
             let ct = headers
                 .get(http::header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok());
-            if body_is_json(ct, &body) {
+            let json = body_is_json(ct, &body);
+            // JSON write API: Bearer. HTML form: Basic.
+            let scheme = if json { Scheme::Bearer } else { Scheme::Basic };
+            if !auth.allows(
+                headers
+                    .get(http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok()),
+                scheme,
+            ) {
+                return respond_unauthorized(scheme);
+            }
+            if json {
                 return match admin_json_write(&st.db_path, &body, lng) {
                     JsonWrite::ParseErr(msg) => respond_json_status(
                         StatusCode::BAD_REQUEST,
@@ -191,6 +218,14 @@ pub fn route_cgi(
                 }
             };
         }
+        if !auth.allows(
+            headers
+                .get(http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok()),
+            Scheme::Basic,
+        ) {
+            return respond_unauthorized(Scheme::Basic);
+        }
         let html = Localized::from((
             lng,
             Page(
@@ -228,6 +263,8 @@ pub fn route_cgi(
 #[cfg(feature = "cgi")]
 pub async fn cgi_run(db: PathBuf) -> std::io::Result<()> {
     let st = State::load(db).map_err(std::io::Error::other)?;
+    let auth = Auth::from_env();
+    // No warning: CGI starts a process per request, it would spam the error log.
     let has_body = std::env::var("CONTENT_LENGTH")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -261,8 +298,9 @@ pub async fn cgi_run(db: PathBuf) -> std::io::Result<()> {
                 .to_bytes();
             let lng = lang_from_headers(&headers, &st);
             let theme = theme_from_headers(&headers);
-            let resp: Result<http::Response<BoxBody<Bytes, std::io::Error>>, std::io::Error> =
-                Ok(route_cgi(&st, lng, theme, &method, &path, &headers, body));
+            let resp: Result<http::Response<BoxBody<Bytes, std::io::Error>>, std::io::Error> = Ok(
+                route_cgi(&st, &auth, lng, theme, &method, &path, &headers, body),
+            );
             resp
         },
     )
@@ -282,7 +320,10 @@ impl cegla_fcgi::server::Runtime for TokioRt {
 }
 
 #[cfg(any(feature = "fcgi", feature = "scgi"))]
-pub async fn read_body_capped<B>(mut body: B, content_length: usize) -> Result<Bytes, std::io::Error>
+pub async fn read_body_capped<B>(
+    mut body: B,
+    content_length: usize,
+) -> Result<Bytes, std::io::Error>
 where
     B: BodyExt + Unpin,
     B::Data: AsRef<[u8]>,
@@ -313,14 +354,18 @@ where
 #[cfg(feature = "fcgi")]
 pub async fn fcgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind).await?;
+    let auth = Auth::from_env();
+    auth.warn_if_unset();
     println!("trashdiff fcgi listening on {bind}");
     loop {
         let (stream, _) = listener.accept().await?;
         let db = db.clone();
+        let auth = auth.clone();
         tokio::spawn(async move {
             let _ =
                 cegla_fcgi::server::server_handle_fcgi(stream, TokioRt, move |request, _stderr| {
                     let db = db.clone();
+                    let auth = auth.clone();
                     async move {
                         let method = request.method().clone();
                         let path = request.uri().path().to_string();
@@ -337,7 +382,9 @@ pub async fn fcgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
                         let resp: Result<
                             http::Response<BoxBody<Bytes, std::io::Error>>,
                             std::io::Error,
-                        > = Ok(route_cgi(&st, lng, theme, &method, &path, &headers, body));
+                        > = Ok(route_cgi(
+                            &st, &auth, lng, theme, &method, &path, &headers, body,
+                        ));
                         resp
                     }
                 })
@@ -349,13 +396,17 @@ pub async fn fcgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
 #[cfg(feature = "scgi")]
 pub async fn scgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind).await?;
+    let auth = Auth::from_env();
+    auth.warn_if_unset();
     println!("trashdiff scgi listening on {bind}");
     loop {
         let (stream, _) = listener.accept().await?;
         let db = db.clone();
+        let auth = auth.clone();
         tokio::spawn(async move {
             let _ = cegla_scgi::server::server_handle_scgi(stream, move |request| {
                 let db = db.clone();
+                let auth = auth.clone();
                 async move {
                     let method = request.method().clone();
                     let path = request.uri().path().to_string();
@@ -372,7 +423,9 @@ pub async fn scgi_run(bind: String, db: PathBuf) -> std::io::Result<()> {
                     let resp: Result<
                         http::Response<BoxBody<Bytes, std::io::Error>>,
                         std::io::Error,
-                    > = Ok(route_cgi(&st, lng, theme, &method, &path, &headers, body));
+                    > = Ok(route_cgi(
+                        &st, &auth, lng, theme, &method, &path, &headers, body,
+                    ));
                     resp
                 }
             })
