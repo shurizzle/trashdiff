@@ -4,6 +4,8 @@ use clap::{Parser, Subcommand};
 
 mod admin;
 mod i18n;
+#[cfg(feature = "mcp")]
+mod mcp;
 mod minify;
 mod schedule;
 mod transport;
@@ -11,6 +13,8 @@ mod views;
 #[cfg(feature = "http")]
 mod web;
 
+#[cfg(feature = "mcp")]
+use crate::mcp::mcp_run;
 #[cfg(feature = "cgi")]
 use crate::transport::cgi_run;
 use crate::transport::cli_cmd;
@@ -63,6 +67,13 @@ enum Command {
         /// Bind address (host:port)
         #[arg(long, default_value = "127.0.0.1:9000")]
         bind: String,
+        /// Path to database file
+        #[arg(long, default_value = "trashdb.toml", env = "TRASHDIFF_DB")]
+        db: PathBuf,
+    },
+    /// Run an MCP server over stdio (Model Context Protocol)
+    #[cfg(feature = "mcp")]
+    Mcp {
         /// Path to database file
         #[arg(long, default_value = "trashdb.toml", env = "TRASHDIFF_DB")]
         db: PathBuf,
@@ -125,6 +136,14 @@ fn main() -> std::io::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(scgi_run(bind, db))
         }
+        #[cfg(feature = "mcp")]
+        Command::Mcp { db } => match mcp_run(db) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        },
     }
 }
 
@@ -921,5 +940,161 @@ mod tests {
         assert!(response.contains("Status: 400"));
         assert!(response.contains("error"));
         assert!(response.contains("invalid JSON"));
+    }
+
+    #[cfg(feature = "mcp")]
+    fn mcp_db(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("trashdiff_mcp_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    #[cfg(feature = "mcp")]
+    fn mcp_call(id: u32, name: &str, args: serde_json::Value) -> String {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": args },
+        })
+        .to_string()
+    }
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn mcp_handshake_and_tools_list() {
+        use crate::mcp::handle;
+        let db = mcp_db("list");
+        assert_eq!(
+            handle(
+                &db,
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#
+            ),
+            None
+        );
+        let init = handle(
+            &db,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+        )
+        .unwrap();
+        assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+        assert_eq!(init["result"]["serverInfo"]["name"], "trashdiff");
+        assert_eq!(
+            init["result"]["capabilities"]["tools"],
+            serde_json::json!({})
+        );
+
+        let list = handle(&db, r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).unwrap();
+        let names: Vec<&str> = list["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["what_to_throw", "schedule_read", "schedule_write"]);
+
+        let bad = handle(&db, r#"{"jsonrpc":"2.0","id":3,"method":"nope"}"#).unwrap();
+        assert_eq!(bad["error"]["code"], -32601);
+        let garbage = handle(&db, "{").unwrap();
+        assert_eq!(garbage["error"]["code"], -32700);
+        let unknown = handle(&db, &mcp_call(4, "nope", serde_json::json!({}))).unwrap();
+        assert_eq!(unknown["error"]["code"], -32602);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn mcp_reads_writes_and_rejects_overlap() {
+        use crate::mcp::handle;
+        let db = mcp_db("write");
+
+        let read = handle(&db, &mcp_call(1, "schedule_read", serde_json::json!({}))).unwrap();
+        let text = read["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Europe/Rome"));
+        assert!(text.contains("\"pickup_time\": \"05:00\""));
+
+        let args = serde_json::json!({
+            "timezone": "Europe/Rome",
+            "pickup_time": "07:30",
+            "default_lang": "it",
+            "custom_js": null,
+            "custom_css": null,
+            "schedule": [[{"weeks":[1,3],"type":"Carta"}],[],[],[],[],[],[]]
+        });
+        let saved = handle(&db, &mcp_call(2, "schedule_write", args)).unwrap();
+        assert!(saved["result"].get("isError").is_none());
+        let st = State::load(db.clone()).unwrap();
+        assert_eq!(st.pickup_time.format("%H:%M").to_string(), "07:30");
+        assert_eq!(st.schedule[0].kind, "Carta");
+        assert_eq!(st.schedule[0].weeks, w(&[1, 3]));
+
+        let overlap = serde_json::json!({
+            "timezone": "Europe/Rome",
+            "pickup_time": "07:30",
+            "schedule": [
+                [{"weeks":[1],"type":"Carta"},{"weeks":[1],"type":"Umido"}],
+                [],[],[],[],[],[]
+            ]
+        });
+        let bad = handle(&db, &mcp_call(3, "schedule_write", overlap)).unwrap();
+        assert_eq!(bad["result"]["isError"], true);
+        let text = bad["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("overlaps"));
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[cfg(all(feature = "http", feature = "mcp"))]
+    #[actix_web::test]
+    async fn mcp_http_endpoint_roundtrip() {
+        use crate::web::{AppState, mcp_no_stream, mcp_post};
+        use actix_web::{App, test, web};
+        let db = mcp_db("http");
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(AppState(db.clone())))
+                .route("/mcp", web::post().to(mcp_post))
+                .route("/mcp", web::get().to(mcp_no_stream)),
+        )
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/mcp")
+            .insert_header(("content-type", "application/json"))
+            .set_payload(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        assert!(
+            resp.headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("application/json")
+        );
+        let raw = test::read_body(resp).await;
+        let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(v["result"]["serverInfo"]["name"], "trashdiff");
+
+        let note = test::TestRequest::post()
+            .uri("/mcp")
+            .set_payload(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+            .to_request();
+        assert_eq!(test::call_service(&app, note).await.status(), 202);
+
+        let batch = test::TestRequest::post()
+            .uri("/mcp")
+            .set_payload("[{}]")
+            .to_request();
+        let raw = test::read_body(test::call_service(&app, batch).await).await;
+        let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(v["error"]["code"], -32600);
+
+        let get = test::TestRequest::get().uri("/mcp").to_request();
+        assert_eq!(
+            test::call_service(&app, get).await.status(),
+            actix_web::http::StatusCode::METHOD_NOT_ALLOWED
+        );
+        let _ = std::fs::remove_file(&db);
     }
 }

@@ -20,6 +20,7 @@ into a handful of modules plus static assets.
 | `src/admin.rs` | Admin write path: form/JSON parsing, `validate_and_save`, `process_admin`, `AdminWrite`/`WriteErrors`/`JsonWrite` |
 | `src/web.rs` | actix-web HTTP frontend: `AppState`, handlers, `serve` |
 | `src/transport.rs` | Non-actix frontends: `route_cgi`, `cgi_run`/`fcgi_run`/`scgi_run`, `cli_cmd`, response helpers |
+| `src/mcp.rs` | MCP (Model Context Protocol) server: `handle` (pure tool dispatch) + `mcp_run` (stdio transport) |
 | `src/i18n.rs` | `Lang` (IT/EN), the `T` message-key enum, translation table, HTML escaping, `LocalizedDisplay` trait |
 | `src/minify.rs` | Runtime oxc/lightningcss minifiers for inline `custom_js` / `custom_css` (`minify_js`/`minify_css`), same pipeline as `build.rs` |
 | `src/admin.js` | Progressive-enhancement JS for the backoffice (add/remove rows, client-side validation); no framework |
@@ -55,6 +56,8 @@ the bottom of `main.rs`, and `i18n.rs` has its own.
 **HTTP** (`web.rs`): actix-web `HttpServer` with routes — `GET /`→`home`, `GET /home.json`→`home_json_endpoint`, `GET|POST /admin`→`admin_get`/`admin_post`, `GET /admin.json`→`admin_json_endpoint`, `GET /lang/{code}`→`switch_lang`, `GET /theme/{code}`→`switch_theme`. Uses `actix_web::rt::Runtime`. Only the `PathBuf` is cached (`AppState`); `State` is reloaded per request.
 
 **CGI / FCGI / SCGI** (`transport.rs`) share one manual router `route_cgi`: `path.trim_end_matches('/')` matched against `/lang/*`, `/theme/*` (303 + `Set-Cookie`), `/admin` (POST→JSON or form, GET→HTML), `/home.json`, `/admin.json`, else home. Transport drivers: `cgi_run` (`cegla_cgi::server::handle_request`), `fcgi_run` (`TcpListener` + `cegla_fcgi::server::server_handle_fcgi`), `scgi_run` (`server_handle_scgi`); all load `State` then call `route_cgi`. Body read via generic `read_body_capped<B>`. Responses are `http::Response<BoxBody<Bytes, io::Error>>` built by `respond`/`respond_json`/`redirect`.
+
+**MCP** (`mcp.rs`): JSON-RPC 2.0, two transports over the same pure `handle(db, line) -> Option<Value>` (None for notifications, i.e. no `id`). stdio: `mcp_run` reads a line, calls `handle`, writes the reply. HTTP: `web::mcp_post` on `POST /mcp` (streamable HTTP, stateless) calls the same `handle`, passing the lossy-UTF-8 body, and answers `200 application/json` or `202` for notifications; `GET`/`DELETE /mcp` return `405` (no SSE stream, no sessions). Methods: `initialize`, `ping`, `tools/list`, `tools/call`; unknown methods/results use standard JSON-RPC error codes. Tools map straight onto existing code: `what_to_throw` → `home_view(&State::load(db)?, Utc::now())`, `schedule_read` → `admin_json(&st)`, `schedule_write` → `admin_json_write` (arguments *are* the `admin.json` shape, so read → edit → write round-trips). Tool results are `{content:[{type:"text",text:"<json>"}]}`, with `isError: true` for validation failures. stdout carries only protocol frames: any stray print corrupts the stream, so errors go to stderr.
 
 **Static assets**: none served — `style.min.css`/`dark.min.css` are inlined in `Page::fmt` (`views.rs`) and `admin.min.js` in `AdminFormHtml::fmt` via `include_str!`. `Page::fmt` also injects the optional `custom_css` config value in `<head>` (inline `<style>` or `<link rel="stylesheet">`) and appends the optional `custom_js` (inline script or `<script src>`) as the last element before `</body>`.
 
@@ -100,6 +103,8 @@ the bottom of `main.rs`, and `i18n.rs` has its own.
 | `cgi` | `transport::cgi_run`, auto-detected via `GATEWAY_INTERFACE` | — | tokio |
 | `fcgi` | `transport::fcgi_run` | `127.0.0.1:9000` | tokio |
 | `scgi` | `transport::scgi_run` | `127.0.0.1:4000` | tokio |
+| `mcp` | `mcp::mcp_run` | stdio (spawned by the client) | none (sync std) |
+| `mcp` over HTTP | `web::mcp_post` on `POST /mcp` | same as `http` | actix (via `http` feature) |
 | `cli` | `transport::cli_cmd` | prints what can be thrown now | tokio |
 
 `--db` defaults to `trashdb.toml` (env `TRASHDIFF_DB`; explicit flag wins).
@@ -107,9 +112,10 @@ the bottom of `main.rs`, and `i18n.rs` has its own.
 ### Build features
 
 Each frontend sits behind a Cargo feature, all enabled by default: `http`,
-`cgi`, `fcgi`, `scgi`. The `cli` subcommand is always built. Turning a feature
+`cgi`, `fcgi`, `scgi`, `mcp`. The `cli` subcommand is always built. Turning a feature
 off removes its subcommand and its dependencies (`actix-web` for `http`,
 `cegla-cgi`/`cegla-fcgi`/`cegla-scgi` + `tokio` for the CGI family), e.g.
 `cargo build --no-default-features --features fcgi`. The transport code in
-`transport.rs` and the `web` module are `#[cfg]`-gated accordingly; only the
-`PathBuf`-loading `cli_cmd` and shared domain logic stay unconditional.
+`transport.rs`, `web.rs` and `mcp.rs` are `#[cfg]`-gated accordingly; only the
+`PathBuf`-loading `cli_cmd` and shared domain logic stay unconditional. `mcp`
+pulls in no dependency of its own (only `serde_json`, already required).

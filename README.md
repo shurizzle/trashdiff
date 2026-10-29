@@ -20,7 +20,7 @@ cargo build --release
 ```
 
 Each frontend is behind a Cargo feature (all enabled by default): `http`,
-`cgi`, `fcgi`, `scgi`. The `cli` subcommand and the domain logic are always
+`cgi`, `fcgi`, `scgi`, `mcp`. The `cli` subcommand and the domain logic are always
 built. Build only what you deploy:
 
 ```sh
@@ -37,6 +37,7 @@ trashdiff http [--bind HOST:PORT] [--db PATH]
 trashdiff cgi  [--db PATH]
 trashdiff fcgi [--bind HOST:PORT] [--db PATH]
 trashdiff scgi [--bind HOST:PORT] [--db PATH]
+trashdiff mcp  [--db PATH]
 trashdiff cli  [--db PATH]
 ```
 
@@ -91,6 +92,43 @@ location / {
 }
 ```
 
+### mcp
+
+Model Context Protocol (JSON-RPC 2.0), for AI clients. Tools: `what_to_throw`
+(same data as `/home.json`), `schedule_read` (same shape as `/admin.json`)
+and `schedule_write` (full replace, same validation as `POST /admin`).
+
+Two transports:
+
+- **Streamable HTTP** — `POST /mcp` on the regular HTTP server. Stateless: no
+  session id, no server-initiated SSE stream (`GET`/`DELETE /mcp` answer
+  `405`). Requests get `200` with `application/json`; notifications get `202`
+  with an empty body.
+
+  ```json
+  {
+    "mcpServers": {
+      "trashdiff": { "type": "http", "url": "http://127.0.0.1:8080/mcp" }
+    }
+  }
+  ```
+
+- **stdio** — the client spawns the process. No network port.
+
+  ```json
+  {
+    "mcpServers": {
+      "trashdiff": {
+        "command": "trashdiff",
+        "args": ["mcp", "--db", "/srv/trashdb.toml"]
+      }
+    }
+  }
+  ```
+
+`trashdiff mcp` writes nothing to stdout except protocol frames; errors go to
+stderr and to JSON-RPC error frames.
+
 ### cli
 
 Print what can be thrown right now. Output language follows the `LANG`
@@ -113,6 +151,8 @@ trashdiff cli
   `custom_css` (`null` = none; URL or inline content) and `schedule`, an
   array of 7 arrays (Monday..Sunday), each holding that weekday's rows
   `{ "weeks": [...], "type": "..." }` in the order shown on the page
+- `/mcp` — Model Context Protocol endpoint (streamable HTTP, stateless); see
+  the `mcp` section below
 - `POST /admin` — full-replace write API: send the `admin.json` shape with
   `Content-Type: application/json` (a body starting with `{` is also
   detected). Validated like the backoffice save (type required for the ticked
@@ -175,5 +215,5 @@ type = "Carta"
 cargo test
 ```
 
-Window logic plus CGI/FastCGI/SCGI protocol round-trips (duplex sockets, no
-web server needed).
+Window logic, CGI/FastCGI/SCGI protocol round-trips (duplex sockets, no
+web server needed) and MCP JSON-RPC framing/tools.

@@ -3,14 +3,15 @@ name = "trashdiff"
 version = "0.5.3"
 edition = "2024"
 license = "MIT"
-description = "Weekly waste collection schedule with http/cgi/fcgi/scgi frontends"
+description = "Weekly waste collection schedule with http/cgi/fcgi/scgi/mcp frontends"
 
 [features]
-default = ["http", "cgi", "fcgi", "scgi"]
+default = ["http", "cgi", "fcgi", "scgi", "mcp"]
 http = ["dep:actix-web"]
 cgi = ["dep:cegla-cgi", "dep:tokio"]
 fcgi = ["dep:cegla-fcgi", "dep:tokio"]
 scgi = ["dep:cegla-scgi", "dep:tokio"]
+mcp = []
 
 [dependencies]
 actix-web = { version = "4", optional = true }

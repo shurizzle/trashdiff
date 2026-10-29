@@ -27,7 +27,7 @@ fn theme_of(req: &HttpRequest) -> Theme {
     Theme::from_req(cookie)
 }
 
-struct AppState(PathBuf);
+pub(crate) struct AppState(pub(crate) PathBuf);
 
 #[allow(clippy::result_large_err)]
 fn load_or_500(data: &AppState) -> Result<State, HttpResponse> {
@@ -180,6 +180,24 @@ async fn admin_json_endpoint(_req: HttpRequest, data: web::Data<AppState>) -> Ht
         .body(json)
 }
 
+#[cfg(feature = "mcp")]
+pub(crate) async fn mcp_post(data: web::Data<AppState>, body: web::Bytes) -> HttpResponse {
+    let text = String::from_utf8_lossy(&body);
+    match crate::mcp::handle(&data.0, &text) {
+        Some(resp) => HttpResponse::Ok()
+            .content_type("application/json; charset=utf-8")
+            .body(resp.to_string()),
+        // Notification or client response: nothing to send back.
+        None => HttpResponse::Accepted().finish(),
+    }
+}
+
+#[cfg(feature = "mcp")]
+pub(crate) async fn mcp_no_stream() -> HttpResponse {
+    // Stateless server: no server-initiated SSE stream, no explicit sessions.
+    HttpResponse::MethodNotAllowed().finish()
+}
+
 async fn switch_lang(req: HttpRequest, path: web::Path<String>) -> HttpResponse {
     let code = path.into_inner();
     let lng = if code == "en" { "en" } else { "it" };
@@ -223,7 +241,7 @@ pub async fn serve(bind: String, db_path: PathBuf) -> std::io::Result<()> {
     let data = web::Data::new(AppState(db_path));
     println!("trashdiff listening on http://{bind}");
     HttpServer::new(move || {
-        App::new()
+        let app = App::new()
             .app_data(data.clone())
             .route("/", web::get().to(home))
             .route("/home.json", web::get().to(home_json_endpoint))
@@ -231,7 +249,13 @@ pub async fn serve(bind: String, db_path: PathBuf) -> std::io::Result<()> {
             .route("/admin", web::post().to(admin_post))
             .route("/admin.json", web::get().to(admin_json_endpoint))
             .route("/lang/{code}", web::get().to(switch_lang))
-            .route("/theme/{code}", web::get().to(switch_theme))
+            .route("/theme/{code}", web::get().to(switch_theme));
+        #[cfg(feature = "mcp")]
+        let app = app
+            .route("/mcp", web::post().to(mcp_post))
+            .route("/mcp", web::get().to(mcp_no_stream))
+            .route("/mcp", web::delete().to(mcp_no_stream));
+        app
     })
     .bind(bind)?
     .run()
